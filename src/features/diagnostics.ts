@@ -115,8 +115,12 @@ export class Ra3Diagnostics {
         }
       }
 
+      // Elements outside the EA asset namespace (e.g. XInclude <xi:include>)
+      // are not part of the RA3 XSD model; skip their validation entirely.
+      const isXsdElement = model.isXsdElementName(el.name);
+
       // Unknown element.
-      if (settings.diagnoseUnknownElements && !el.name.startsWith("xi:")) {
+      if (settings.diagnoseUnknownElements && isXsdElement) {
         const knownType = model.elementTypeName(local);
         if (!knownType) {
           diags.push(
@@ -131,38 +135,42 @@ export class Ra3Diagnostics {
       }
 
       // Attributes.
-      const elType = resolveElementType(el);
-      const knownAttrs = model.attributesOfType(elType);
-      const knownNames = new Set(knownAttrs.map((a) => a.name));
-      for (const attr of el.attrs) {
-        const aName = attr.name;
-        if (aName.startsWith("xmlns") || aName.startsWith("xai:") || aName.startsWith("xi:")) {
-          continue;
-        }
-        if (settings.diagnoseUnknownElements && !knownNames.has(aName)) {
-          diags.push(
-            this.diag(
-              new vscode.Range(
-                document.positionAt(attr.nameStart),
-                document.positionAt(attr.nameEnd),
+      if (isXsdElement) {
+        const elType = resolveElementType(el);
+        const knownAttrs = model.attributesOfType(elType);
+        const knownNames = new Set(knownAttrs.map((a) => a.name));
+        for (const attr of el.attrs) {
+          const aName = attr.name;
+          // Namespace declarations and prefixed attributes (xai:, xi:,
+          // xlink:, xml:, xsi:, xmlns:*) are not defined by the EA XSD.
+          if (aName.startsWith("xmlns") || !model.isXsdAttributeName(aName)) {
+            continue;
+          }
+          if (settings.diagnoseUnknownElements && !knownNames.has(aName)) {
+            diags.push(
+              this.diag(
+                new vscode.Range(
+                  document.positionAt(attr.nameStart),
+                  document.positionAt(attr.nameEnd),
+                ),
+                `Unknown attribute "${aName}" for <${local}>`,
+                vscode.DiagnosticSeverity.Warning,
+                "unknown-attribute",
               ),
-              `Unknown attribute "${aName}" for <${local}>`,
-              vscode.DiagnosticSeverity.Warning,
-              "unknown-attribute",
-            ),
+            );
+          }
+
+          if (!attr.hasValue) continue;
+          this.checkValueReferences(
+            elType,
+            attr.name,
+            attr.value,
+            attr,
+            document,
+            idx,
+            diags,
           );
         }
-
-        if (!attr.hasValue) continue;
-        this.checkValueReferences(
-          elType,
-          attr.name,
-          attr.value,
-          attr,
-          document,
-          idx,
-          diags,
-        );
       }
 
       // Include-specific checks.

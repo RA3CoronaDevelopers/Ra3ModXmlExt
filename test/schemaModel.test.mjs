@@ -53,6 +53,23 @@ test("Include has reference/instance/all enum", () => {
   assert.deepEqual(type?.enumValues, ["reference", "instance", "all"]);
 });
 
+test("foreign namespaces are excluded from XSD validation", () => {
+  // XInclude elements (xi:include / xi:fallback) come from the W3C XInclude
+  // namespace, not from the EA asset XSD.
+  assert.equal(model.isXsdElementName("xi:include"), false);
+  assert.equal(model.isXsdElementName("xi:fallback"), false);
+  assert.equal(model.isXsdElementName("GameObject"), true);
+  assert.equal(model.isXsdElementName("AssetDeclaration"), true);
+  // EA schema attributes are unprefixed; prefixed attributes (xai:, xi:,
+  // xlink:, xml:, xsi:, xmlns:*) are namespace machinery.
+  assert.equal(model.isXsdAttributeName("href"), true);
+  assert.equal(model.isXsdAttributeName("xpointer"), true);
+  assert.equal(model.isXsdAttributeName("xai:joinAction"), false);
+  assert.equal(model.isXsdAttributeName("xlink:href"), false);
+  assert.equal(model.isXsdAttributeName("xml:space"), false);
+  assert.equal(model.isXsdAttributeName("xmlns:xi"), false);
+});
+
 test("type assignability follows inheritance", () => {
   assert.ok(model.isAssignableTo("GameObject", "BaseInheritableAsset"));
   assert.ok(model.isAssignableTo("GameObject", "GameObject"));

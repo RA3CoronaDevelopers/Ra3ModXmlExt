@@ -322,3 +322,135 @@ hover 同时显示 `No matching definition of the expected declared type...`。
 > `ModuleId` 等模块引用指向同一 GameObject 内的兄弟模块，但部分引用（如武器上的
 > `AttachModuleId`）目标 GameObject 跨文件无法静态确定，本轮先统一不检查；待局部
 > 作用域建模落地后再启用这些引用的解析与诊断。
+
+---
+
+## 十、问题分析（第五轮，2026-08-01）：`xi:include` 的 `href`/`xpointer` 误报未知属性
+
+### 问题
+
+AttachTest `Allied Vehicle\Guardian Tank\GameObject.xml` 第 249 行附近：
+
+```xml
+<xi:include
+    href="DATA:Includes/HeadlightDraw2.xml"
+    xpointer="xmlns(n=uri:ea.com:eala:asset) xpointer(/n:HeadlightDraw2/child::*)"/>
+```
+
+报两条 `Unknown attribute "href" / "xpointer" for <include>`（`unknown-attribute`），
+hover 同时显示 `Unknown attribute for this element.`。
+
+这个元素属于 **W3C XInclude 命名空间**（`xmlns:xi="http://www.w3.org/2001/XInclude"`），
+并不是 EA `uri:ea.com:eala:asset` XSD 的一部分。同一行在第二轮“问题 C”处理过
+（嵌套 `xi:include` 的索引与导航），但那轮没有覆盖 unknown-attribute 诊断，属于遗留缺口。
+
+### 根因
+
+诊断的属性校验没有像元素校验那样排除外来命名空间：
+
+- 元素校验已有 `!el.name.startsWith("xi:")` 守卫（所以 `<include>` 本身不报 unknown element）；
+- 属性校验只跳过 `xmlns*` / `xai:` / `xi:` 前缀的属性名，而 `href`、`xpointer` 是不带
+  前缀的普通属性名；
+- `<xi:include>` 解析类型为 null（XSD 模型不含该元素），knownAttrs 为空 → 任何属性
+  都被判为 unknown。
+
+### 修复
+
+1. `schemaModel` 新增两个纯函数：
+   - `isXsdElementName`：`xi:` 前缀元素不属于 EA XSD 模型；
+   - `isXsdAttributeName`：EA XSD 属性不带命名空间前缀，带前缀（`xai:`、`xi:`、
+     `xlink:`、`xml:`、`xsi:`、`xmlns:*`）的都是命名空间机制，不做 schema 校验。
+2. `diagnostics`：`xi:` 前缀元素整体跳过 schema 校验（元素与属性都不再误报）；
+   前缀属性名统一跳过。
+3. `hover`：`xi:include` 元素/属性给出 XInclude 说明；`href` 值悬停像
+   `<Include source>` 一样解析目标文件（Ctrl+点击跳转此前已可用）。
+
+### 验证
+
+- 真实文件全量扫描：0 未知元素、0 未知属性（修复前 `href`/`xpointer` 两条必现）；
+- 新增测试：`isXsdElementName` / `isXsdAttributeName` 断言；`xi:include` 解析类型为
+  null 且不参与校验；全量 39/39 通过。
+
+### 后续（架构方向，待确认）
+
+用户提出“先展开 `xi:include`（类比 C++ 宏展开），再处理 mod XML 解析”。该方向与第二轮
+遗留的“虚拟合并”开放项一致，设计要点：
+
+- 构建**逻辑树**而非文本拼接：把目标文件选中内容（`xpointer` 子集）作为子节点拼入父
+  元素，节点保留源文件与原始偏移，避免文本级拼接导致的偏移断裂；
+- 展开范围：`xi:include` 与 EA `<Include type="all">`（内容合并）；`instance` /
+  `reference` 是可见性 / 编译产物语义，不拼树；`inheritFrom` + `joinAction` 是属性级
+  继承合并，不是宏展开；
+- 收益：跨 include 的上下文类型解析、包含内容的结构校验、以及后续“GameObject 内模块
+  id 局部作用域”（HeadlightDraw2 的模块也是该 GameObject 的模块）；
+- 风险：include 环 / 深度限制、大文件性能、`xpointer` 仅支持现有子集形式
+  （`/n:Name/child::*`）。
+
+---
+
+## 十、问题分析（第五轮，2026-08-01）：`xi:include` 的 `href` / `xpointer` 被误报为未知属性
+
+### 问题
+
+同一 GameObject.xml 第 246–249 行：
+
+```xml
+<!-- include Headlight draw module. -->
+<xi:include
+    href="DATA:Includes/HeadlightDraw2.xml"
+    xpointer="xmlns(n=uri:ea.com:eala:asset) xpointer(/n:HeadlightDraw2/child::*)"/>
+```
+
+报两条 `Unknown attribute "href" / "xpointer" for <include>`（unknown-attribute），
+hover 显示 `Unknown attribute for this element.`。
+
+**与第二轮的关系**：第二轮“问题 C”处理的正是同一行的嵌套 `xi:include`——但那一轮修的是
+**索引器**（嵌套 include 不再被静默忽略、缺失目标产生 include-not-found、目标内容进索引），
+本轮这处 **unknown-attribute 诊断**是当时未覆盖的遗留问题。
+
+### 根因
+
+`xi:include` 属于 W3C XInclude 命名空间（`http://www.w3.org/2001/XInclude`），
+**不是 RA3 XSD（`uri:ea.com:eala:asset`）定义的元素**：
+
+- 未知元素检查已通过 `el.name.startsWith("xi:")` 跳过，所以没有 unknown-element 误报；
+- 但属性检查没有同类守卫：`xi:include` 解析类型为 null → `knownAttrs` 为空 →
+  `href`、`xpointer` 两个非 `xi:` 前缀的属性名全部落入 unknown-attribute 分支。
+
+复现证据（真实文件）：
+
+```
+xi:include found: true | parent: Draws
+resolved element type: null
+known attribute names: (none)
+attr href: known=false -> would flag unknown-attribute: true
+```
+
+### 修复
+
+1. **模型层新增命名空间守卫**（`schemaModel.ts`）：
+   - `isXsdElementName(name)`：`xi:` 前缀（XInclude）等外来命名空间元素不属于 XSD 模型；
+   - `isXsdAttributeName(name)`：EA XSD 属性一律无前缀，带前缀的属性
+     （`xai:`、`xi:`、`xlink:`、`xml:`、`xsi:`、`xmlns:*`）都是命名空间机制，不做未知属性校验。
+2. **诊断**（`diagnostics.ts`）：外来命名空间元素的未知元素/未知属性检查整体跳过
+   （`href`、`xpointer` 不再误报）；属性名带前缀的一律跳过校验（比原先只跳过
+   `xmlns`/`xai:`/`xi:` 更完整）。
+3. **hover**（`hover.ts`）：`xi:include` 的元素/属性悬停显示 XInclude 说明；
+   `xi:include@href` 与 `Include@source` 一样显示解析后的目标文件（与第二轮已可用的
+   Ctrl+点击跳转对齐）。
+
+**测试（37 → 39，全部通过）**：
+
+- `schemaModel.test.mjs`：`isXsdElementName` / `isXsdAttributeName` 判定
+  （`xi:include` 非 XSD 元素；`href`/`xpointer` 是合法属性名形态；
+  `xai:joinAction`、`xlink:href`、`xmlns:xi` 等带前缀属性不校验）；
+- `refs.test.mjs`：GameObject → Draws → `xi:include` 实景结构解析类型为 null、
+  元素被判定为外来命名空间，`href`/`xpointer` 不会进入未知属性分支；
+- 实机复验：整份 GameObject.xml 0 个 unknown-attribute 残留。
+
+> **架构讨论（用户提议）**：把 XML 先“宏展开”成不含 `xi:include` 的版本再解析。
+> 这与 BAB 编译时的实际行为一致（`defaultscript.cs` 把整个 Mod 合并成一份大 XML），
+> 也是实现“GameObject 内模块 id 局部作用域解析”（第四轮遗留）的正确地基——展开后一个
+> GameObject 连同 include 进来的兄弟模块都在同一棵树里，`AttachModuleId` 等模块引用才能
+> 静态判定。设计备忘（现状 / 逻辑树方案 / 展开范围 / 落地点 / 检查清单）已整理在
+> `docs/plan.md` 第六节，等待确认后作为下一阶段实现。

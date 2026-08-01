@@ -29,7 +29,7 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     // Attribute name.
     for (const attr of el.attrs) {
       if (offset >= attr.nameStart && offset <= attr.nameEnd) {
-        return this.attributeHover(elType, attr.name);
+        return this.attributeHover(el, elType, attr.name);
       }
     }
     // Attribute value.
@@ -47,6 +47,14 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
   }
 
   private elementHover(name: string): vscode.Hover | null {
+    if (name.startsWith("xi:")) {
+      const md = new vscode.MarkdownString();
+      md.appendCodeblock(`<${name}>`, "xml");
+      md.appendMarkdown(
+        "XInclude element (W3C XInclude namespace) — not part of the RA3 XSD model.",
+      );
+      return new vscode.Hover(md);
+    }
     const type = model.elementTypeName(name);
     const info = type ? model.typeInfo(type) : undefined;
     const md = new vscode.MarkdownString();
@@ -68,7 +76,11 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     return new vscode.Hover(md);
   }
 
-  private attributeHover(elementType: string | null, attrName: string): vscode.Hover | null {
+  private attributeHover(
+    el: { name: string },
+    elementType: string | null,
+    attrName: string,
+  ): vscode.Hover | null {
     const attrs = model.attributesOfType(elementType);
     const attr = attrs.find((a) => a.name === attrName);
     const md = new vscode.MarkdownString();
@@ -76,6 +88,12 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     if (!attr) {
       if (/^(xmlns|xai:)/.test(attrName)) {
         md.appendMarkdown(`Namespace/instance attribute.`);
+        return new vscode.Hover(md);
+      }
+      if (!model.isXsdElementName(el.name)) {
+        md.appendMarkdown(
+          `XInclude attribute (W3C XInclude namespace) — not part of the RA3 XSD model.`,
+        );
         return new vscode.Hover(md);
       }
       md.appendMarkdown("Unknown attribute for this element.");
@@ -117,7 +135,10 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     }
 
     // Include source.
-    if (el.name === "Include" && attrName === "source") {
+    if (
+      (el.name === "Include" && attrName === "source") ||
+      (el.name === "xi:include" && attrName === "href")
+    ) {
       const resolved = idx
         ? resolveSource(
             value,

@@ -212,3 +212,26 @@ export const STRUCTURAL_ELEMENTS = [
   "Defines",
   "Define",
 ];
+
+/**
+ * Element names that live outside the RA3 XSD model's namespace. The model
+ * only covers `uri:ea.com:eala:asset`; other namespaces (so far the W3C
+ * XInclude `xi:`) must not be validated against it.
+ */
+const FOREIGN_ELEMENT_PREFIXES = ["xi:"];
+
+/** True when an element name belongs to the RA3 XSD model's namespace. */
+export function isXsdElementName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return !FOREIGN_ELEMENT_PREFIXES.some((p) => lower.startsWith(p));
+}
+
+/**
+ * True when an attribute name can be validated against the RA3 XSD model.
+ * EA schema attributes are unprefixed; prefixed attributes (`xai:`,
+ * `xi:`, `xlink:`, `xml:`, `xsi:`, `xmlns:*`) are namespace machinery and
+ * are not defined by the XSD.
+ */
+export function isXsdAttributeName(name: string): boolean {
+  return !name.includes(":");
+}

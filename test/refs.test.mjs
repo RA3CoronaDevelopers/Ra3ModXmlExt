@@ -216,3 +216,29 @@ test("top-level asset ids with plain pipeline ids are not references", () => {
     0,
   );
 });
+
+test("xi:include elements are outside the XSD model and unvalidated", () => {
+  // The nested XInclude inside a GameObject draw list (HeadlightDraw2.xml)
+  // must resolve to no XSD type, so href/xpointer can never be flagged as
+  // unknown attributes.
+  const xml = `
+<AssetDeclaration>
+  <GameObject id="GuardianTank">
+    <Draws>
+      <xi:include
+        href="DATA:Includes/HeadlightDraw2.xml"
+        xpointer="xmlns(n=uri:ea.com:eala:asset) xpointer(/n:HeadlightDraw2/child::*)" />
+    </Draws>
+  </GameObject>
+</AssetDeclaration>`;
+  const doc = parseXml(xml);
+  const inc = doc.elements.find((e) => e.name === "xi:include");
+  assert.ok(inc);
+  assert.equal(model.isXsdElementName(inc.name), false);
+  assert.equal(resolveElementType(inc), null);
+  // The XInclude attributes themselves are unprefixed (model-valid name
+  // shape); the element-level foreign check is what keeps them quiet.
+  for (const a of inc.attrs) {
+    assert.equal(model.isXsdAttributeName(a.name), true, a.name);
+  }
+});

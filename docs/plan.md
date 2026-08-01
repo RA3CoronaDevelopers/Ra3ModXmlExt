@@ -123,7 +123,7 @@ test/
 4. [x] 纯 TS 核心：include 解析、manifest 解析、XML 解析封装、索引器、引用解析。
 5. [x] 功能层：补全、hover、导航、诊断、大纲、高亮 grammar。
 6. [x] 单测（fixture Mod，31 个用例全绿）+ 编译 + `vsce package` 打包（ra3-mod-xml-0.1.0.vsix，约 259KB）。
-7. [x] 在 AttachTest / GenEvoTest / Corona 上做冒烟验证，并按真实项目反馈修复问题（详见 `docs/analysis-issues.md` 四轮分析）。
+7. [x] 在 AttachTest / GenEvoTest / Corona 上做冒烟验证，并按真实项目反馈修复问题（详见 `docs/analysis-issues.md` 五轮分析）。
 
 ## 四、验证结果（实测）
 
@@ -133,7 +133,7 @@ test/
 | GenEvoTest | 24 文件 | ~1.8s | 35,392（manifest 35,322） | 项目 ID（alliedmcv 等）正确收录 |
 | Corona | 3,448 文件（+ 非 XML 资产路径） | ~54.5s | 55,305（manifest 35,322） | 3 个流、183 个 Define、0 诊断 |
 
-单元测试覆盖：XML 解析（自闭合/容错/偏移）、include 解析（BAB 顺序、SDK 根优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、`childTypeOf`、大小写规范化、属性级 refType）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、模块 `id` 定义点、Poid 局部引用、`Side="Allies"` 命中 manifest 的 `PlayerTemplate`）。
+单元测试覆盖：XML 解析（自闭合/容错/偏移）、include 解析（BAB 顺序、SDK 根优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、`childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中 manifest 的 `PlayerTemplate`）。
 
 > 注：`D:\Mods\CoronaMod` 位于移动硬盘，当前未连接；GenEvoTest / Corona 的回归需在 D: 盘可用时补跑（用户会另行通知）。
 
@@ -142,4 +142,86 @@ test/
 - 假设 SDK 路径默认 `C:\Apps\RA3-MODSDK-X`（与 prompts 一致），可在设置中修改。
 - 假设补全/导航以“文本语义分析”为主，不做完整 XSD 校验（BAB 才是权威校验器）。
 - 开放：是否发布到 VS Code Marketplace（需要 publisher）——本期先保证本地 `vsce package` 可安装。
-- 开放：嵌套 `xi:include` 内容的"虚拟合并"进父文档（用于父文档内的补全/诊断感知被内联内容）——当前仅保证目标文件可索引、可导航、缺失可诊断。
+- 开放：**“宏展开”式虚拟合并**（用户提议，方向已确认）：解析前先把 `xi:include`
+  （以及顶层 `<Include type="all">`、`inheritFrom` 继承合并）展开成不含 include 的
+  文档树，再对展开后的树做 XSD 校验、补全与诊断——与 BAB 编译时把整个 Mod 合并成
+  一份大 XML 的行为一致。展开树需携带**来源追溯**（错误/跳转仍定位到原始文件），
+  并处理 xpointer 子集解析与 include 循环。当前仅做到：目标文件可索引、可导航、
+  缺失可诊断；`xi:include` 本身不参与 XSD 校验（第五轮）。
+  该功能也是“GameObject 内模块 id 局部作用域解析”（第四轮遗留）的地基。
+  详细设计备忘见下一节。
+
+## 六、include 展开设计备忘（2026-08-01，待实施）
+
+> 目的：集中记录 include 处理相关的现状、结论与设计，下次遇到 include 问题时从这里继续，
+> 并在实施后把结果回写本节。
+
+### 1. 现状（截至第五轮，已实现）
+
+| 能力 | 状态 |
+|---|---|
+| `<Include type="all">` / `instance` 递归索引（顶层资产、流、Define） | 已实现（indexer `walk`） |
+| `reference` → builtmods manifest 解析 / 缺失回退占位 XML | 已实现 |
+| 嵌套 `xi:include`（任意层级）：目标可索引、缺失报 `include-not-found`、Ctrl+点击跳转、`href` hover 解析目标 | 已实现（第二轮 + 第五轮） |
+| `xi:include` 及其属性不参与 XSD 校验（外来命名空间守卫 `isXsdElementName` / `isXsdAttributeName`） | 已实现（第五轮） |
+| include 目标内容“虚拟合并”进父文档的逻辑树 | **未实现**（本文档主题） |
+
+### 2. 已确认的方向
+
+先展开成不含 include 的文档树（类比 C++ 宏展开），再对展开后的树做 mod XML 解析。
+BAB（`defaultscript.cs`）编译时正是这样把整个 Mod 合并成一份大 XML 的。
+
+### 3. 关键设计决策：逻辑树拼接，不做文本拼接
+
+- **不要**把 include 目标展开成文本再整体重新解析：源码偏移会断裂，诊断 / 跳转 / hover /
+  补全全部无法映射回原始文件。
+- **要做**的是：解析器逐文件解析（现状不变）；展开器把目标文件选中节点按 `xpointer`
+  子集挂进父元素，节点保留各自的源文件与原始偏移（来源追溯）。后续分析跑在逻辑树上，
+  范围映射按节点 `sourceFile` 回到对应文件的 lineMap。
+- 现有 `parseXml` 已记录标签 / 属性 / 值的起止偏移，`XmlElement` 结构可直接复用；拼接时
+  用浅拷贝节点壳并重建 parent 链，避免破坏目标文件缓存树自身的 parent 指针。
+
+### 4. 展开范围
+
+| 构造 | 拼入逻辑树 | 理由 |
+|---|---|---|
+| `xi:include` | ✅ | 内容并入父元素（HeadlightDraw2 场景） |
+| EA `<Include type="all">` | ✅ | BAB“内容合并”，等价于复制进来 |
+| `type="instance"` | ❌ | 只影响编译可见性；拼树会把 BaseVehicle 的顶层资产错误塞进当前文档 |
+| `type="reference"` | ❌ | manifest 编译产物，无文本内容 |
+| `inheritFrom` + `xai:joinAction` | 单独一轮 | 元素级继承深合并（Replace/Remove），不是宏展开 |
+
+### 5. 落地位置与接入点
+
+- 新纯模块（与编辑器解耦，呼应 P1）：输入 `(parse 树, resolveSource 回调, readDocument 回调)`，
+  输出逻辑树（root + elements 扁平列表，沿用 diagnostics 的遍历形态）。
+- 接入：diagnostics / hover / navigation / completion 目前各自 `parseXml(text)`；
+  改为 parse 后过 expander 取逻辑树；范围映射按节点 `sourceFile` 选对应文件的 lineMap。
+- 按需展开（当前打开文档）+ 按文件缓存（复用 indexer `readDocument` 的 LRU）；
+  环 / 深度守卫复用现有 `visitedAll` 与深度限制思路（建议最大深度 64）。
+- `xpointer`：仅支持 mod 实际使用的 `xmlns(n=...) xpointer(/n:Name/child::*)` 子集
+  （现有 `findXPointerContainer` 正则已覆盖）；完整 XPath 暂不支持，遇到新形式先记录到本节。
+
+### 6. 后续收益（承接第四 / 五轮遗留）
+
+- **GameObject 内模块 id 局部作用域**：展开后 include 进来的兄弟模块（HeadlightDraw2）
+  与本体模块同树，`AttachModuleId` / `ModuleId` / `AutoResolveBody` 等 Poid 引用
+  才能静态解析与诊断（第四轮遗留）；
+- 跨 include 的上下文类型解析与结构校验；
+- 顶层 `type="all"` 合并后，当前文档视角的重复 id / 引用诊断更接近 BAB 结果。
+
+### 7. 风险与边界
+
+- 大文件性能（Corona 约 7500 文件 / 38MB）：只展开当前文档的可达链，不全局展开；
+- include 环 / 深度：visited 集合 + 最大深度；
+- 被包含内容的诊断上报位置：建议按节点源文件 URI 上报（与偏移一致），包含点的 `href`
+  上只报“缺失 / 无法解析 / 环”类问题；
+- `inheritFrom` 深合并（`xai:joinAction` 的 Replace/Remove 语义）单独设计，别与宏展开混在一轮。
+
+### 8. 下次遇到 include 问题的检查清单
+
+1. 现象发生在哪一层：索引（indexer）、诊断（diagnostics）、导航 / hover、还是补全？
+2. 现状能力是否已覆盖（见第 1 节表格）；
+3. 涉及内容是否跨文件（需要逻辑树）还是本文件内（当前解析树即可）；
+4. 若要展开：先实现第 5 节的纯模块与单测（fixture 增加 HeadlightDraw2 场景），再接入 feature；
+5. 把新结论回写本节与 `docs/analysis-issues.md`。
