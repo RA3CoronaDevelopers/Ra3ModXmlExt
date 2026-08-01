@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+	<Defines>
+		<Define name="TEST_HEALTH" value="100.0" />
+	</Defines>
+	<GameObject
+		id="TestTank"
+		inheritFrom="BaseVehicle"
+		CommandSet="TestTankCommandSet"
+		KindOf="SELECTABLE">
+	</GameObject>
+	<GameObject
+		id="TestTank"
+		Side="Allies">
+	</GameObject>
+	<Includes>
+		<Include type="instance" source="BaseVehicle.xml" />
+	</Includes>
+</AssetDeclaration>

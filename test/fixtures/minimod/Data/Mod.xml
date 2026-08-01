@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+	<Tags />
+	<Includes>
+		<Include type="reference" source="DATA:static.xml" />
+		<Include type="reference" source="DATA:global.xml" />
+		<Include type="reference" source="DATA:audio.xml" />
+		<Include type="all" source="Includes/Units.xml" />
+		<Include type="all" source="Includes/Weapons.xml" />
+		<Include type="all" source="Includes/Shared.xml" />
+		<Include type="all" source="Includes/Refs.xml" />
+	</Includes>
+</AssetDeclaration>

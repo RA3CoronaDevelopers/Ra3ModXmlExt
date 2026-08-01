@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+	<HeadlightDraw2 id="FragLight">
+		<Model Name="frag.mdl" />
+	</HeadlightDraw2>
+</AssetDeclaration>

@@ -1,0 +1,57 @@
+我希望创建一个用于红警3 Modding XML 的 VSCode 扩展插件。这个扩展插件将提供以下功能：
+1. 语法高亮：为红警3 Modding XML 文件提供语法高亮显示，使代码更易读。可能许多 XML 插件已经支持这个功能。
+2. 自动补全：根据红警3 Modding XML 的语法规则，提供自动补全功能，帮助用户快速编写代码。
+3. 引用提示：在用户输入时，提供相关的引用提示，帮助用户了解可用的标签和属性。
+4. 引用导航：允许用户快速跳转到相关的标签或属性定义，提升代码浏览和编辑效率。
+5. 错误检查：在用户编写代码时，实时检查语法错误，并提供错误提示，帮助用户快速修复问题。
+[非近期目标] 6. 搜索：在 mod 项目巨大时，提供高效的搜索方式（直接搜索可能会很慢），这种特殊需求可能有很多需要考虑的部分，需要后期仔细设计，暂时不考虑。或者可以留一个极简的可拓展的搜索接口。
+[非近期目标] 这些功能，可能会需要一个高效的索引 mod xml 内容的机制，才能实现 VSCode 拓展。那么这个机制能否用在 VSCode 拓展以外的部分呢？之前提到的“搜索”可能是一个例子，假如要能支持其他使用方式（而不仅仅是一个 VSCode 拓展），该怎么设计呢？
+
+典型红警3 Mod XML 里有两种较为重要的入口：
+1. Data/Mod.xml
+这个是最主要的入口文件，定义了绝大部分内容
+2. Data/mapmetadata_*.xml
+这个本来是 EA 为红警3 提供的地图元数据文件，按照EA的原设计，应该是用来定义 <MapMetadata> 标签的内容。
+但是这些 mapmetadata 文件在游戏中是最早被加载的，而且 XML 里也不止可以写 MapMetadata 标签，还可以写其他标签，所以这些最早加载的 XML 可以用来初始化游戏的很多全局配置，所以被玩家用来实现“全局数据”的配置
+
+因此，mod 的 XML 文件可以分为两类：
+1. 基础数据（Static Data），包含模组绝大多数素材、贴图、音频、单位定义、配置等
+2. 全局数据（Global Data），包含一些无法卸载基础数据里的全局配置
+
+从入口文件开始，XML 会包含其他 XML，主要方式是通过 <Include> 标签，
+有三种方式：
+1. reference：引用其他 XML 文件的内容。本身不会包含被引用 XML 的内容，只是引用了其他 XML 的内容。
+最典型的使用方式是 reference static.xml, global.xml, audio.xml。
+这三个 XML 一般用来代表游戏本体（而非 mod 的）基础数据、全局数据和音频数据。
+这三个文件本身是占位符（空文件）。但是等价于 reference 了一个包含所有定义的 XML
+实际上 BinaryAssetBuilder 会去引用 SDK 文件夹 builtmods 里的已编译二进制文件：
+C:\Apps\RA3-MODSDK-X\builtmods，这里面的 static.manifest、global.manifest、audio.manifest
+当前 XML 编译成 manifest 之后，会添加对应 manifest 的引用。
+对于 manifest 的格式，可以参考这个开源代码：https://github.com/OpenSAGE/OpenSAGE/blob/d45d361e8f41211e34cc219d72d0502a6b2d5694/src/OpenSage.Game/Data/StreamFS/ManifestFile.cs （注意：最新版本的分支不再有这个文件夹，链接里的 commit 是最后一刻可以参考的版本）
+2. instance：引用包含其他 XML 文件的源码。本身不会包含被引用 XML 的内容，只是在编译过程中能“看到”那个XML的源码。这种情况下被引用的是一个真实存在的 XML 文件，不是占位符，也不需要预编译的 manifest 文件。当前 XML 编译成 manifest 之后，不会因为 instance 就去引用另一个 manifest 文件。典型的使用方式是引用游戏本体的源码、使用 inheritFrom 进行继承。
+3. all：等同于把目标 XML 的内容直接复制到当前 XML 里。因此 mod.xml 会递归使用 all 方式引用所有的 XML 文件，最终 mod.xml 会包含 mod 的所有 XML 内容。
+
+inheritFrom 代表继承另一个 XML 元素的内容，默认拥有对象元素的所有内容。具体的继承细节还可以被uri:ea.com:eala:asset:instance:joinAction（一般是 xai:joinAction）控制
+
+关于 include 规则，可以参考我之前开发的一个“检测重复id”的python小工具：它也需要解析 include 才能读取所有 xml 才能检测重复 id。你可以参考这个工具的源码，了解 include 的解析规则：check_duplicate_id.py
+
+你还可以参考 defaultscript.cs
+这里面有 mod 的编译脚本，尤其是它如何调用 BinaryAssetBuilder 的
+可以重点关注的步骤是建立基础数据（Static Data）和建立全局数据（Global Data）
+但是需要注意：这里面既有较为标准规范、适合参考的部分，也有一些是玩家 modder 们自行加上去的 hack，可能并不适合直接参考。
+例如：玩家为了方便制作增量补丁，定义了 Art1、Data1 这样的文件夹结构
+除此之外游戏模组还有一些和 XML 关系不大的部分（例如 HLSL），我们可以暂时不考虑这些部分。
+你在分析的 defaultscript.cs 的时候，需要注意区分哪些是应该实际参考的
+实际上有用的部分应该是和 check_duplicate_id.py 里类似的。
+
+Mod SDK 里既提供编译后的原版游戏本体 manifest（用来支持 include reference），也提供原版游戏本体的部分源码（用来支持 include instance，或者就是供 modder 参考）。你可以参考这些源码，这些源码按照 defaultscript.cs 或者 check_duplicate_id.py 的 include 规则。例如，SDK 的 SageXml 文件夹对应 DATA:，里面的 XML 文件就是游戏本体的源码；游戏本体的美术素材（art）和音频素材（audio）也有对应的文件，只不过它们一般是空的（主要靠 reference 了）
+
+游戏的 XML 格式由 XSD 规定，MOD SDK 自带 XSD：C:\Apps\RA3-MODSDK-X\Schemas\xsd\CnC3Types.xsd
+
+可供参考的中小项目：
+D:\Mods\CoronaMod\mods\mods\GenEvoTest
+C:\Apps\RA3-MODSDK-X\Mods\AttachTest
+可供参考的大型项目：
+D:\Mods\CoronaMod\mods\mods\corona\
+该大型项目自带自己的 xsd: D:\Mods\CoronaMod\mods\mods\corona\xsd\CnC3Types.xsd
+以上，提供了很多外部项目进行参考，你被鼓励读取并考虑把文件复制到工作区里进行分析（本工作区内你可以随意操作），以避免对这些外部项目进行破坏性操作

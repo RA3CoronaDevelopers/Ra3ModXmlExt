@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+	<!-- Same id on two different asset types: navigation must filter by the
+	     attribute's reference type. -->
+	<WeaponTemplate id="SharedThing" />
+	<GameObject id="SharedThing" />
+
+	<!-- Nested xi:include: content is inlined into the parent element. -->
+	<GameObject id="XiNestedGameObject">
+		<Draws>
+			<xi:include
+				href="DATA:Includes/Fragment.xml"
+				xpointer="xmlns(n=uri:ea.com:eala:asset) xpointer(/n:HeadlightDraw2/child::*)" />
+			<xi:include href="DATA:Missing/Nested.xml" />
+		</Draws>
+	</GameObject>
+</AssetDeclaration>

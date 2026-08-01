@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+	<MpGameRules id="TheMpGameRules">
+		<SkirmishStartCash LoCash="10000" HiCash="50000" />
+	</MpGameRules>
+</AssetDeclaration>

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "RA3 Mod XML",
+  "scopeName": "source.ra3modxml",
+  "injectionSelector": "L:source.xml",
+  "patterns": [
+    {
+      "name": "constant.other.ra3.define",
+      "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
+    },
+    {
+      "name": "keyword.other.ra3.inherit",
+      "match": "\\binheritFrom\\b"
+    },
+    {
+      "name": "keyword.other.ra3.joinaction",
+      "match": "xai:joinAction"
+    },
+    {
+      "name": "entity.name.tag.ra3.include",
+      "match": "</?(AssetDeclaration|Includes|Include|Tags|Tag|Defines|Define)\\b"
+    },
+    {
+      "name": "comment.line.ra3.todo",
+      "match": "(?i)(TODO|FIXME|HACK|XXX)(?=\\s|:|-|$)"
+    }
+  ]
+}

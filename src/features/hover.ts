@@ -1,0 +1,185 @@
+import * as vscode from "vscode";
+import { findElementAt, parseXml } from "../language/xmlParser";
+import { resolveElementType } from "../language/typeContext";
+import * as model from "../model/schemaModel";
+import type { ModWorkspace } from "../workspace";
+import type { ModIndex } from "../indexer/types";
+import {
+  isReferenceAttributeOfType,
+  resolveReferenceTargetsForType,
+} from "../indexer/refs";
+import { dirname } from "node:path";
+import { buildSearchPaths, resolveSource } from "../indexer/includeResolver";
+
+export class Ra3HoverProvider implements vscode.HoverProvider {
+  constructor(private ws: ModWorkspace) {}
+
+  async provideHover(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    _token: vscode.CancellationToken,
+  ): Promise<vscode.Hover | null> {
+    const text = document.getText();
+    const offset = document.offsetAt(position);
+    const doc = parseXml(text);
+    const el = findElementAt(doc, offset);
+    if (!el) return null;
+    const elType = resolveElementType(el);
+
+    // Attribute name.
+    for (const attr of el.attrs) {
+      if (offset >= attr.nameStart && offset <= attr.nameEnd) {
+        return this.attributeHover(elType, attr.name);
+      }
+    }
+    // Attribute value.
+    for (const attr of el.attrs) {
+      if (attr.hasValue && offset >= attr.valueStart && offset <= attr.valueEnd) {
+        return this.valueHover(el, elType, attr.name, attr.value, document, this.ws.index);
+      }
+    }
+    // Element name.
+    const nameStart = el.start + 1;
+    if (offset >= nameStart && offset <= nameStart + el.name.length) {
+      return this.elementHover(el.name);
+    }
+    return null;
+  }
+
+  private elementHover(name: string): vscode.Hover | null {
+    const type = model.elementTypeName(name);
+    const info = type ? model.typeInfo(type) : undefined;
+    const md = new vscode.MarkdownString();
+    md.appendCodeblock(`<${name}>`, "xml");
+    if (model.isTopLevelElement(name)) md.appendMarkdown(`**Top-level asset element**  \n`);
+    if (info?.kind === "complex") {
+      if (info.doc) md.appendMarkdown(`${info.doc}  \n`);
+      md.appendMarkdown(
+        `Attributes: ${info.attributes.length} · Children: ${info.children.length}  \n`,
+      );
+      if (info.base) md.appendMarkdown(`Extends: \`${info.base}\``);
+    } else if (info?.kind === "simple") {
+      md.appendMarkdown(`Simple type: \`${type}\``);
+    } else if (type) {
+      md.appendMarkdown(`Type: \`${type}\``);
+    } else {
+      md.appendMarkdown("Not found in the bundled XSD model.");
+    }
+    return new vscode.Hover(md);
+  }
+
+  private attributeHover(elementType: string | null, attrName: string): vscode.Hover | null {
+    const attrs = model.attributesOfType(elementType);
+    const attr = attrs.find((a) => a.name === attrName);
+    const md = new vscode.MarkdownString();
+    md.appendCodeblock(`${attrName}=""`, "xml");
+    if (!attr) {
+      if (/^(xmlns|xai:)/.test(attrName)) {
+        md.appendMarkdown(`Namespace/instance attribute.`);
+        return new vscode.Hover(md);
+      }
+      md.appendMarkdown("Unknown attribute for this element.");
+      return new vscode.Hover(md);
+    }
+    if (attr.doc) md.appendMarkdown(`${attr.doc}  \n`);
+    if (attr.required) md.appendMarkdown(`**Required**  \n`);
+    if (attr.refType) md.appendMarkdown(`References assets of type \`${attr.refType}\`  \n`);
+    if (attr.enumValues.length)
+      md.appendMarkdown(`Values: \`${attr.enumValues.join("`, `")}\`  \n`);
+    if (attr.default != null) md.appendMarkdown(`Default: \`${attr.default}\`  \n`);
+    if (attr.allowsDefine) md.appendMarkdown(`May use \`$DEFINE\` constants  \n`);
+    md.appendMarkdown(`Type: \`${attr.type ?? "string"}\``);
+    return new vscode.Hover(md);
+  }
+
+  private valueHover(
+    el: { name: string },
+    elType: string | null,
+    attrName: string,
+    value: string,
+    document: vscode.TextDocument,
+    idx: ModIndex | null,
+  ): vscode.Hover | null {
+    const md = new vscode.MarkdownString();
+
+    // $DEFINE reference.
+    const defineMatch = /\$([A-Za-z_][A-Za-z0-9_]*)/.exec(value);
+    if (defineMatch && idx) {
+      const defs = idx.defines.get(defineMatch[1].toLowerCase());
+      if (defs?.length) {
+        const d = defs[0];
+        md.appendMarkdown(`**Define** \`$${d.name}\`  \n`);
+        md.appendCodeblock(d.value);
+        const rel = relativePath(document, d.file);
+        md.appendMarkdown(`Defined in \`${rel}:${d.line}\``);
+        return new vscode.Hover(md);
+      }
+    }
+
+    // Include source.
+    if (el.name === "Include" && attrName === "source") {
+      const resolved = idx
+        ? resolveSource(
+            value,
+            dirname(document.uri.fsPath),
+            buildSearchPaths(idx.sdkDir, idx.projectDir),
+          ).path
+        : null;
+      if (resolved) {
+        md.appendMarkdown(`**Include source**  \n`);
+        md.appendCodeblock(resolved);
+        return new vscode.Hover(md);
+      }
+      const cand = idx?.sourceCandidates.find((c) => c.source === value);
+      if (cand) {
+        md.appendMarkdown(`**Include source**  \n`);
+        md.appendCodeblock(cand.path);
+        return new vscode.Hover(md);
+      }
+      md.appendMarkdown(`Include source: \`${value}\` (not in candidate index)`);
+      return new vscode.Hover(md);
+    }
+
+    // Asset reference / inheritFrom.
+    if (idx) {
+      if (!isReferenceAttributeOfType(elType, attrName)) return null;
+      const targets = resolveReferenceTargetsForType(idx, elType, attrName, value);
+      if (targets.length) {
+        const md2 = new vscode.MarkdownString();
+        md2.appendMarkdown(`**${targets.length} definition${targets.length > 1 ? "s" : ""}**  \n`);
+        for (const { def: d } of targets.slice(0, 8)) {
+          const loc =
+            d.origin === "manifest"
+              ? `manifest \`${d.manifestSource ?? d.file}\``
+              : `\`${relativePath(document, d.file)}:${d.line}\``;
+          md2.appendMarkdown(`- \`${d.type}\` · ${loc}  \n`);
+        }
+        return new vscode.Hover(md2);
+      }
+      const attrRef = model
+        .attributesOfType(elType)
+        .find((a) => a.name === attrName);
+      const expected = attrRef?.refType
+        ? ` of type \`${attrRef.refType}\``
+        : attrRef?.isRef
+          ? " of the expected declared type"
+          : "";
+      md.appendMarkdown(
+        `No matching definition${expected} in the current index` +
+          " (may exist in a compiled manifest or vanilla data).",
+      );
+      return new vscode.Hover(md);
+    }
+
+    return null;
+  }
+}
+
+function relativePath(document: vscode.TextDocument, abs: string): string {
+  const root = vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath;
+  if (!root) return abs;
+  const rel = abs.toLowerCase().startsWith(root.toLowerCase())
+    ? abs.slice(root.length + 1)
+    : abs;
+  return rel;
+}

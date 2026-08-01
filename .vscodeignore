@@ -1,0 +1,17 @@
+.vscode/**
+.git/**
+src/**
+test/**
+tools/**
+out/**
+node_modules/**
+prompts
+check_duplicate_ids.py
+debug.log
+docs/**
+OpenSAGE/**
+test/**
+**/*.map
+tsconfig.json
+esbuild.mjs
+package-lock.json
