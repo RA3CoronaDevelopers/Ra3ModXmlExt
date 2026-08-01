@@ -1,6 +1,10 @@
 import * as vscode from "vscode";
 import { parseXml, type XmlElement } from "../language/xmlParser";
-import { analyzeContext, type CompletionContext } from "../language/context";
+import {
+  analyzeContext,
+  splitListValuePrefix,
+  type CompletionContext,
+} from "../language/context";
 import { resolveElementType } from "../language/typeContext";
 import * as model from "../model/schemaModel";
 import { isLocalReferenceAttribute } from "../indexer/refs";
@@ -178,12 +182,31 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     const el = ctx.element;
     const attr = ctx.attr;
     if (!el || !attr) return [];
-    const prefix = ctx.valuePrefix;
+    const rawPrefix = ctx.valuePrefix;
 
-    const endOffset = attr.quoteEnd > attr.valueEnd ? attr.valueEnd : document.offsetAt(position);
+    const attrName = attr.name.toLowerCase();
+    const elType = resolveElementType(el);
+    const attrInfo = model
+      .attributesOfType(elType)
+      .find((a) => a.name.toLowerCase() === attrName);
+
+    // xs:list values (bit flags such as Surfaces="GROUND WATER") are
+    // whitespace-separated: only the token currently being edited is used for
+    // filtering, and the replacement range covers that token instead of the
+    // whole value.
+    const seg = attrInfo?.isList
+      ? splitListValuePrefix(rawPrefix)
+      : { token: rawPrefix, start: 0 };
+    const prefix = seg.token;
+
+    const valueStartOffset =
+      attr.valueStart >= 0 ? attr.valueStart : document.offsetAt(position);
+    const endOffset =
+      attr.quoteEnd > attr.valueEnd ? attr.valueEnd : document.offsetAt(position);
+    const rangeStart = valueStartOffset + seg.start;
     const valueRange = new vscode.Range(
-      document.positionAt(attr.valueStart),
-      document.positionAt(Math.max(attr.valueStart, endOffset)),
+      document.positionAt(rangeStart),
+      document.positionAt(Math.max(rangeStart, endOffset)),
     );
 
     const make = (
@@ -201,7 +224,6 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     };
 
     const isInclude = el.name === "Include";
-    const attrName = attr.name.toLowerCase();
 
     // Include type / source
     if (isInclude && attrName === "type") {
@@ -217,11 +239,6 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         make(v, vscode.CompletionItemKind.EnumMember, "xai:joinAction"),
       );
     }
-
-    const elType = resolveElementType(el);
-    const attrInfo = model
-      .attributesOfType(elType)
-      .find((a) => a.name.toLowerCase() === attrName);
 
     // inheritFrom: same element type first, then everything.
     if (attrName === "inheritfrom") {

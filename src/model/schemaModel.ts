@@ -20,6 +20,8 @@ export interface AttributeInfo {
   /** True for reference-typed attributes whose simple type has no refType. */
   isRef: boolean;
   enumValues: string[];
+  /** True for xs:list types (whitespace-separated bit flags / lists). */
+  isList: boolean;
   allowsDefine: boolean;
   isBoolean: boolean;
   base: string | null;
@@ -39,6 +41,7 @@ export interface SimpleTypeInfo {
   refType: string | null;
   isRef: boolean;
   enumValues: string[];
+  isList: boolean;
   allowsDefine: boolean;
   doc: string;
 }

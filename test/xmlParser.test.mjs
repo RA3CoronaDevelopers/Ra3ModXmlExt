@@ -45,3 +45,29 @@ test("tolerates partial input while typing", () => {
   assert.ok(doc.errors.length >= 1); // unclosed
   assert.equal(doc.elements.length, 2);
 });
+
+test("recovers from an unterminated attribute value at end of line", () => {
+  // Typing an attribute value quote without its closing quote makes the tag
+  // malformed; the parser must stop the broken start tag at the line break so
+  // the rest of the document (and completion for it) keeps working.
+  const text = `<AssetDeclaration>\n  <A x="1" y="abc\n  <B/>\n  </A>\n</AssetDeclaration>`;
+  const doc = parseXml(text);
+  assert.ok(doc.errors.some((e) => e.message === "Unterminated start tag"));
+  assert.deepEqual(doc.elements.map((e) => e.name), ["AssetDeclaration", "A", "B"]);
+  const a = doc.elements.find((e) => e.name === "A");
+  const y = a.attrs.find((at) => at.name === "y");
+  assert.equal(y.quoteEnd, -1);
+  assert.equal(text.slice(y.valueStart, y.valueEnd), "abc");
+  const b = doc.elements.find((e) => e.name === "B");
+  assert.ok(b.start > a.start);
+});
+
+test("reports an unterminated attribute value at EOF", () => {
+  const text = `<A x="abc`;
+  const doc = parseXml(text);
+  assert.ok(doc.errors.some((e) => /Unterminated start tag/.test(e.message)));
+  assert.equal(doc.elements.length, 1);
+  const a = doc.elements[0];
+  assert.equal(a.attrs[0].value, "abc");
+  assert.equal(a.attrs[0].quoteEnd, -1);
+});

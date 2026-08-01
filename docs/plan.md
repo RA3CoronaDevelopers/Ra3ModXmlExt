@@ -61,7 +61,7 @@
 - **核心与编辑器解耦**：`language/`、`model/`、`indexer/` 为纯 TS 模块（不 import `vscode`），可单测与复用（呼应 P1 需求 7）。
 - **esbuild 打包**，产物 `dist/extension.js`。
 - **XSD → JSON 模型**：开发期工具 `tools/xsd-to-model.mjs` 把 821 个 XSD 解析成 `schema-model.json`（元素树、属性、文档、枚举、引用类型映射），随插件发布；运行时不再解析 XSD。
-- **运行时 XML 解析**：自研带源码偏移的轻量解析器 `language/xmlParser.ts`（标签/属性/值均记录起止偏移，容错解析以支持输入中的补全与诊断）。`fast-xml-parser` 仅用于开发期 XSD 生成。
+- **运行时 XML 解析**：自研带源码偏移的轻量解析器 `language/xmlParser.ts`（标签/属性/值均记录起止偏移，容错解析以支持输入中的补全与诊断；未闭合引号在行尾恢复，避免吞掉整个文档）。`fast-xml-parser` 仅用于开发期 XSD 生成。
 - **AssetType 哈希表**：`tools/extract-asset-types.mjs` 从 OpenSAGE `AssetType.cs` 提取 `asset-types.json`；哈希未知时以 manifest 名称前缀推导类型。
 
 ### 架构
@@ -75,6 +75,7 @@ src/
     xmlParser.ts       带源码偏移的轻量 XML 解析器（格式错误定位、容错）
     context.ts         补全上下文分析（元素名/属性名/属性值/内容）
     typeContext.ts     上下文感知元素类型解析（resolveElementType 沿解析树逐层解析）
+    semanticTokens.ts  语义 token 兜底高亮（纯 TS：标签/属性/值范围，仅 malformed 时启用）
   model/
     schemaModel.ts     schema-model.json 的类型/属性/子元素查询 + 类型名规范化（纯 TS）
     schema-model.json  由 tools/xsd-to-model.mjs 生成
@@ -87,19 +88,21 @@ src/
     indexer.ts         工作区索引器（资产/Define/流/manifest 合并，LRU 解析缓存）
     types.ts           共享类型
   features/
-    completion.ts      补全 provider（元素/属性/值，上下文感知）
+    completion.ts      补全 provider（元素/属性/值，上下文感知；xs:list 多值按当前段过滤）
     hover.ts           hover provider
     navigation.ts      定义/引用/文档链接/大纲
     diagnostics.ts     实时诊断
+    semanticTokens.ts  语义 token provider（文档有解析错误时接管着色）
 syntaxes/
   ra3modxml.tmLanguage.json   注入 source.xml 的领域高亮（纯注入，不替换 XML 主语法）
 tools/
-  xsd-to-model.mjs       XSD → schema-model.json
+  xsd-to-model.mjs       XSD → schema-model.json（含 xs:list：继承 item 枚举/引用语义，isList 标记）
   extract-asset-types.mjs OpenSAGE AssetType.cs → asset-types.json
 test/
   fixtures/minimod      样例 Mod（include 各种情形、同名 ID、嵌套 xi:include、manifest 回退）
-  *.test.mjs            8 个测试文件（xmlParser / includeResolver / manifestParser /
-                        indexer / schemaModel / refs / typeContext / manifestTypes）
+  *.test.mjs            11 个测试文件（xmlParser / context / completion / semanticTokens /
+                        includeResolver / manifestParser / indexer / schemaModel / refs /
+                        typeContext / manifestTypes）
 ```
 
 ### 关键设计决策
@@ -114,6 +117,17 @@ test/
 8. **跳转精度**：XML 定义跳转到 `id` 属性值的精确 Range；manifest 定义映射到源码文件（如 SageXml）时也在文件内精确定位；找不到再回退到记录行。
 9. **嵌套 `xi:include`**：任意层级处理——目标缺失产生诊断、目标存在则纳入索引；根级 `xpointer` 容器内容按顶层资产索引。
 10. **性能**：索引在后台执行；解析结果 LRU 缓存（约 64 个文档）；文件保存后防抖全量重建（1.5s），重建期间的新请求标记脏并在完成后重跑；状态栏显示进度与统计。
+11. **`xs:list` 建模与多值补全**：list 简单类型继承 itemType 的枚举 / refType / isRef /
+    allowsDefine 并标记 `isList`（`LocomotorSurfaceBitFlags`、`KindOfBitFlags` 等 79 个
+    类型、317 处属性声明受益）；补全只对“最后一个空格段”过滤，替换范围只覆盖当前段，
+    支持 `Surfaces="GROUND ` 之后继续输入 `W` 提示 `WATER`。
+12. **未闭合引号的行尾恢复**：起始标签扫描到 EOF 且引号未闭合时，在第一个换行处截断
+    标签并继续解析，未闭合只影响当前行（仍上报 `Unterminated start tag`），后续元素
+    的补全 / hover / 诊断不中断。
+13. **语义 token 兜底高亮**：TextMate 对未闭合引号会把后续内容当字符串吞掉（任何
+    XML 编辑器皆然）；扩展注册 `DocumentSemanticTokensProvider`，仅当解析报错时用
+    语义 token 覆盖标签名 / 属性名 / 属性值（标准 token 类型 `type` / `property` /
+    `string`，主题自带配色）。合法文件返回空，观感与纯 TextMate 完全一致。
 
 ## 三、实施步骤
 
@@ -122,8 +136,10 @@ test/
 3. [x] 生成模型：`schema-model.json`（XSD，295 顶层元素 / 1851 类型）与 `asset-types.json`（79 个 AssetType 哈希）。
 4. [x] 纯 TS 核心：include 解析、manifest 解析、XML 解析封装、索引器、引用解析。
 5. [x] 功能层：补全、hover、导航、诊断、大纲、高亮 grammar。
-6. [x] 单测（fixture Mod，31 个用例全绿）+ 编译 + `vsce package` 打包（ra3-mod-xml-0.1.0.vsix，约 259KB）。
-7. [x] 在 AttachTest / GenEvoTest / Corona 上做冒烟验证，并按真实项目反馈修复问题（详见 `docs/analysis-issues.md` 五轮分析）。
+6. [x] 单测（fixture Mod，53 个用例全绿：含 xs:list 枚举、未闭合引号恢复、list 多值
+   分段、带 vscode stub 的补全集成、语义 token 兜底）+ 编译 + `vsce package` 打包
+   （ra3-mod-xml-0.1.0.vsix，约 495KB）。
+7. [x] 在 AttachTest / GenEvoTest / Corona 上做冒烟验证，并按真实项目反馈修复问题（详见 `docs/analysis-issues.md` 六轮分析）。
 
 ## 四、验证结果（实测）
 
@@ -133,7 +149,7 @@ test/
 | GenEvoTest | 24 文件 | ~1.8s | 35,392（manifest 35,322） | 项目 ID（alliedmcv 等）正确收录 |
 | Corona | 3,448 文件（+ 非 XML 资产路径） | ~54.5s | 55,305（manifest 35,322） | 3 个流、183 个 Define、0 诊断 |
 
-单元测试覆盖：XML 解析（自闭合/容错/偏移）、include 解析（BAB 顺序、SDK 根优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、`childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中 manifest 的 `PlayerTemplate`）。
+单元测试覆盖：XML 解析（自闭合/容错/偏移/未闭合引号行尾恢复）、补全上下文（未闭合引号仍为 attribute-value、list 多值分段）、补全集成（vscode stub 下 `LocomotorTemplate@Surfaces` 未闭合引号枚举补全、空格后第二段过滤与替换范围）、语义 token（标签/属性/值范围、合法文档返回空、malformed 返回兜底 token）、include 解析（BAB 顺序、SDK 根优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、`childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list` 枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中 manifest 的 `PlayerTemplate`）。
 
 > 注：`D:\Mods\CoronaMod` 位于移动硬盘，当前未连接；GenEvoTest / Corona 的回归需在 D: 盘可用时补跑（用户会另行通知）。
 

@@ -57,7 +57,7 @@
             "none"
           ],
           "default": "warning",
-          "description": "Severity for attribute references (CommandSet=..., inheritFrom=...) that cannot be resolved in the index. IDs that only exist in compiled manifests cannot be resolved yet."
+          "description": "Severity for attribute references (CommandSet=..., inheritFrom=...) that cannot be resolved in the index. The index covers mod XML sources, SDK SageXml sources and compiled manifests."
         },
         "ra3modxml.diagnoseUnknownElements": {
           "type": "boolean",

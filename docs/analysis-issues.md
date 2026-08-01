@@ -454,3 +454,139 @@ attr href: known=false -> would flag unknown-attribute: true
 > GameObject 连同 include 进来的兄弟模块都在同一棵树里，`AttachModuleId` 等模块引用才能
 > 静态判定。设计备忘（现状 / 逻辑树方案 / 展开范围 / 落地点 / 检查清单）已整理在
 > `docs/plan.md` 第六节，等待确认后作为下一阶段实现。
+
+---
+
+## 十一、问题分析（第六轮，2026-08-01）：`Surfaces="` 未闭合引号导致枚举补全失效
+
+### 现象
+
+在 `<Locomotor ...>` 的起始标签里输入 `Surfaces="`（引号尚未闭合）时：
+
+1. 光标处不出 `LocomotorSurfaceBitFlags` 的枚举补全（GROUND、WATER 等）；
+2. 整个文件高亮退化（XML 变成“不合法”的观感），直到补上第二个引号才恢复。
+
+### 根因（两个独立缺陷叠加）
+
+**A. 上下文分析不认未闭合的引号（`src/language/context.ts`）**
+
+复现证据（编译产物直接执行）：
+
+```
+闭合引号:  <Locomotor id="x" Surfaces="GROUND">…
+ctx.kind = attribute-value, attr = Surfaces, valuePrefix = "GROUND"
+
+未闭合引号: <Locomotor id="x" Surfaces="GROUND>…
+Surfaces: quoteStart=27, quoteEnd=-1   ← 解析器吞掉整个文件
+ctx.kind = attribute-name              ← 补全走错分支
+```
+
+`analyzeStartTag` 判断属性值上下文的条件是 `offset >= quoteStart && offset <= quoteEnd`，
+未闭合时 `quoteEnd = -1` 永远不成立，于是回退成 attribute-name。
+
+**B. 模型生成器不支持 `xs:list`（`tools/xsd-to-model.mjs`）**
+
+XSD 中 `LocomotorSurfaceBitFlags` 是：
+
+```xml
+<xs:simpleType name="LocomotorSurfaceBitFlags">
+  <xs:list itemType="Surface"></xs:list>
+</xs:simpleType>
+```
+
+而 `Surface` 才是真正带 11 个枚举值（GROUND、WATER、CLIFF、AIR…）的类型。生成器
+只读取 `restriction.enumeration`，list 层把枚举全部丢掉——所以**即使引号闭合，模型里
+该属性也没有任何候选值**。影响面：SDK XSD 共 79 个 `xs:list` 简单类型、317 处属性
+声明使用它们（`KindOfBitFlags`、`ObjectStatusBitFlags`、`WeaponFlagsBitFlags`、
+`ModelConditionBitFlags`、`BuildPlacementTypeBitFlags` 等），展开到继承后的模型条目
+共 890 个属性受影响。
+
+### 关于高亮丢失
+
+这是 TextMate XML 语法对“未闭合字符串”的正常行为：后续内容被当作字符串吞掉，直到
+遇到下一个引号或 EOF。与插件注入语法无关（注入部分只有 `$DEFINE`、`inheritFrom` 等
+少量规则），**即使改成 LSP 也不会自动消失**。真正的解法是语义 token
+（`DocumentSemanticTokensProvider`），本次未实施，列为可选后续。
+
+### 修复（第 1–4 项）
+
+1. **解析器行尾恢复**（`src/language/xmlParser.ts`）：起始标签扫描到 EOF 且引号仍未
+   闭合时，把标签在第一个换行处截断并继续解析主循环。未闭合引号只影响当前行，后面
+   的元素照常进入解析树，补全 / hover / 诊断不中断；解析错误仍照常上报
+   （`Unterminated start tag`）。
+2. **未闭合引号上下文**（`src/language/context.ts`）：`quoteEnd < 0` 时，
+   `offset >= quoteStart` 即视为 attribute-value 上下文，`valuePrefix` 照常取引号后
+   到光标处文本。
+3. **模型支持 `xs:list`**（`tools/xsd-to-model.mjs`）：`resolveTypeDescriptor` 解析
+   `xs:list` 的 `itemType`（属性形式或内联 simpleType），继承其枚举值 / refType /
+   isRef / allowsDefine，新增 `isList` 标记；重新生成 `schema-model.json`
+   （`LocomotorSurfaceBitFlags` 恢复 11 个枚举值，`ModelConditionBitFlags` 457 个
+   值与 XSD 一致）。`AttributeInfo` / `SimpleTypeInfo` 接口同步新增 `isList`。
+4. **多值补全按“最后一段”过滤**（`src/features/completion.ts` +
+   `context.splitListValuePrefix`）：list 属性只取当前空格段做前缀过滤，替换范围只
+   覆盖该段——`Surfaces="GROUND ` 之后输入 `W` 也能提示 WATER / WALL_RAILING，而不是
+   用整段前缀匹配失败。
+
+### 验证
+
+- 未闭合引号复现场景：仅报 1 条 `Unterminated start tag`，`<Other/>` 等后续元素仍被
+  解析；`ctx.kind = attribute-value`、`attr = Surfaces`、`valuePrefix = "GROUND"`。
+- 模拟补全过滤：前缀 `G` → `GROUND`；前缀 `W` → `WATER, WALL_RAILING`；
+  `GROUND ` 后输入 `W` → `WATER, WALL_RAILING`。
+- `GameObject@KindOf`：`isList=true`、284 个枚举值。
+- 单元测试 **39 → 50 全部通过**（新增 `test/context.test.mjs` 与带 vscode stub 的
+  `test/completion.test.mjs` 集成用例；xmlParser 新增未闭合引号恢复 / EOF 用例；
+  schemaModel 新增 list 枚举与 `isList` 用例）。
+- `tsc` / `esbuild` 构建通过。
+
+> 补充：真实文件中该场景的元素名是 `<LocomotorTemplate ...>`（AttachTest
+> `Locomotor.xml` 实测，`Surfaces="GROUND CRUSHABLE_OBSTACLE"` 正是多值 list）；
+> SDK XSD 中没有名为 `Locomotor` 的元素，补全集成测试按真实写法夹具。
+
+### 后续可做（未列入本次）
+
+- `AssetIdList` 等“任意资产 ID 列表”的引用语义建模（list 补全框架已就绪，但这类
+  属性在 XSD 里没有 refType，需要另行定义过滤规则）。
+
+> 语义 token 兜底高亮已在第七轮实现（见下节）。
+
+---
+
+## 十二、问题分析（第七轮，2026-08-01）：语义 token 兜底高亮
+
+### 目标
+
+未闭合引号期间 TextMate 把后续内容当字符串吞掉、整个文件高亮退化，这是 XML 语法
+固有的行为（任何 XML 编辑器皆然），也无法靠注入 grammar 修复。本轮的解法是语义
+token：文档出现解析错误时，由插件用自己的容错解析树继续给标签 / 属性 / 值着色。
+
+### 设计
+
+- **纯 TS 核心**（`src/language/semanticTokens.ts`）：`buildSemanticTokenRanges(doc, text)`
+  把解析树转换成按位置排序的 `{ line, startChar, length, tokenType }`；token 类型只用
+  标准 `type` / `property` / `string`，所有主题自带配色，无需额外贡献样式。
+  - 元素名：起始标签与闭合标签各一个 `type` token；
+  - 属性名：`property` token；
+  - 属性值：`string` token，闭合时含两端引号，未闭合时从开引号到行尾恢复点
+    （如 `"GROUND>`）。
+- **provider**（`src/features/semanticTokens.ts`）：`parseXml` 后若
+  `doc.errors.length === 0` 直接返回空——合法文件观感与纯 TextMate 完全一致；
+  有解析错误时才用 `SemanticTokensBuilder` 编码输出。
+- **注册**：`extension.ts` 对 `xml` 语言注册 `DocumentSemanticTokensProvider`，
+  legend 与 provider 共用同一实例。
+
+### 验证
+
+- malformed（`Surfaces="GROUND>` 未闭合）：`AssetDeclaration` / `LocomotorTemplate` /
+  `<Other/>` 标签名、`id` / `Surfaces` 属性名、`"x"` 与 `"GROUND>` 值均有 token，
+  且按位置升序排列；
+- 合法文档：返回空 token 数组；
+- 单元测试 **50 → 53 全部通过**（新增 `test/semanticTokens.test.mjs`，纯函数 + vscode
+  stub 的 provider 集成）；`tsc` 通过。
+
+### 边界与取舍
+
+- 语义 token 只在解析报错时启用，且使用主题对 `type` / `property` / `string` 的默认
+  配色，可能与 TextMate XML 配色略有差异——只在打字过程中出现，可接受；
+- 未实现 `provideDocumentSemanticTokensEdits`（delta 版本），每次全量计算；单文件
+  解析在 KB 级，开销可忽略。

@@ -168,6 +168,7 @@ function resolveTypeDescriptor(typeName, memo = new Map()) {
       name,
       refType: null,
       enumValues: [],
+      isList: false,
       allowsDefine: false,
       isBoolean: name === "boolean",
       base: null,
@@ -180,6 +181,37 @@ function resolveTypeDescriptor(typeName, memo = new Map()) {
   const st = simpleTypes.get(name);
   if (st) {
     memo.set(name, null); // guard against cycles
+    const listNode = st?.list;
+    if (listNode) {
+      // xs:list types (bit flags such as LocomotorSurfaceBitFlags, AssetIdList,
+      // PercentageList, ...) serialize as whitespace-separated items. The
+      // usable enum/ref semantics come from the item type, so inherit them.
+      let itemDesc = null;
+      let inlineEnum = [];
+      let inlineAllowsDefine = false;
+      const itemTypeName = normalizeTypeName(listNode?.["@_itemType"]);
+      if (itemTypeName) {
+        itemDesc = resolveTypeDescriptor(itemTypeName, memo);
+      } else if (listNode.simpleType) {
+        inlineEnum = enumOfSimpleType(listNode.simpleType);
+        const pats = patternOfSimpleType(listNode.simpleType);
+        inlineAllowsDefine = pats ? pats.some(patternAllowsDefine) : false;
+      }
+      const desc = {
+        kind: "simple",
+        name,
+        refType: itemDesc?.refType ?? null,
+        enumValues: itemDesc?.enumValues?.length ? itemDesc.enumValues : inlineEnum,
+        isList: true,
+        allowsDefine: (itemDesc?.allowsDefine ?? false) || inlineAllowsDefine,
+        isRef: itemDesc?.isRef ?? false,
+        isBoolean: false,
+        base: itemDesc?.base ?? null,
+        doc: docOf(st),
+      };
+      memo.set(name, desc);
+      return desc;
+    }
     const base = normalizeTypeName(st?.restriction?.["@_base"]);
     const baseDesc = base ? resolveTypeDescriptor(base, memo) : null;
     const enumValues = enumOfSimpleType(st);
@@ -192,6 +224,7 @@ function resolveTypeDescriptor(typeName, memo = new Map()) {
       name,
       refType: normalizeTypeName(refType) || baseDesc?.refType || null,
       enumValues: enumValues.length ? enumValues : baseDesc?.enumValues ?? [],
+      isList: false,
       allowsDefine:
         (patterns ? patterns.some(patternAllowsDefine) : false) ||
         baseDesc?.allowsDefine ||
@@ -215,6 +248,7 @@ function resolveTypeDescriptor(typeName, memo = new Map()) {
       name,
       refType: null,
       enumValues: [],
+      isList: false,
       allowsDefine: false,
       isRef: false,
       isBoolean: false,
@@ -230,9 +264,10 @@ function resolveTypeDescriptor(typeName, memo = new Map()) {
     name,
     refType: null,
     enumValues: [],
-      allowsDefine: false,
-      isRef: false,
-      isBoolean: false,
+    isList: false,
+    allowsDefine: false,
+    isRef: false,
+    isBoolean: false,
     base: null,
     doc: "",
   };
@@ -287,6 +322,7 @@ function collectAttributes(node, out = []) {
         name: `@attr:${name}`,
         refType: attr.simpleType?.["@_refType"] ?? null,
         enumValues: inlineEnum,
+        isList: false,
         allowsDefine: pats ? pats.some(patternAllowsDefine) : false,
         isBoolean: false,
         base: normalizeTypeName(attr.simpleType?.restriction?.["@_base"]),
@@ -308,6 +344,7 @@ function collectAttributes(node, out = []) {
         normalizeTypeName(desc?.refType) ??
         null,
       enumValues: desc?.enumValues ?? inlineEnum ?? [],
+      isList: desc?.isList ?? false,
       allowsDefine: desc?.allowsDefine ?? false,
       isRef: desc?.isRef ?? false,
       isBoolean: desc?.isBoolean ?? false,
@@ -396,6 +433,7 @@ for (const [name, node] of simpleTypes) {
     refType: desc?.refType ?? node?.["@_refType"] ?? null,
     isRef: node?.["@_isRef"] === "true" || desc?.refType != null,
     enumValues: desc?.enumValues ?? [],
+    isList: desc?.isList ?? false,
     allowsDefine: desc?.allowsDefine ?? false,
     doc: docOf(node),
   };

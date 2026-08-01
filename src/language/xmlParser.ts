@@ -336,7 +336,16 @@ export function parseXml(text: string): XmlDocument {
     const gt = findTagEnd(text, i + 1);
     if (gt < 0) {
       err("Unterminated start tag", i);
-      const content = text.slice(i + 1);
+      // Recovery while typing: an attribute value whose closing quote has not
+      // been typed yet makes the scanner run to EOF. End the malformed start
+      // tag at the first line break (or EOF) so the rest of the document is
+      // still parsed and completion/hover keep working for the elements after
+      // the broken tag. The missing quote/tag end is still reported above.
+      let recoverTo = i + 1;
+      while (recoverTo < text.length && text[recoverTo] !== "\n" && text[recoverTo] !== "\r") {
+        recoverTo++;
+      }
+      const content = text.slice(i + 1, recoverTo);
       const raw = parseTag(content, i + 1);
       if (raw.name) {
         const el = buildElement(raw, stack.length);
@@ -344,7 +353,8 @@ export function parseXml(text: string): XmlDocument {
         root = root ?? el;
         stack.push(el);
       }
-      break;
+      i = recoverTo + 1;
+      continue;
     }
     const content = text.slice(i + 1, gt);
     const raw = parseTag(content, i + 1);

@@ -9,6 +9,10 @@ import {
   Ra3ReferenceProvider,
 } from "./features/navigation";
 import { Ra3Diagnostics } from "./features/diagnostics";
+import {
+  Ra3SemanticTokensProvider,
+  RA3_SEMANTIC_TOKENS_LEGEND,
+} from "./features/semanticTokens";
 
 const XML_SELECTOR: vscode.DocumentSelector = [{ language: "xml" }];
 
@@ -53,6 +57,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerDocumentSymbolProvider(
       XML_SELECTOR,
       new Ra3DocumentSymbolProvider(),
+    ),
+  );
+  context.subscriptions.push(
+    vscode.languages.registerDocumentSemanticTokensProvider(
+      XML_SELECTOR,
+      new Ra3SemanticTokensProvider(),
+      RA3_SEMANTIC_TOKENS_LEGEND,
     ),
   );
 

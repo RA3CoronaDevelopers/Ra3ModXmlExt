@@ -76,7 +76,15 @@ function analyzeStartTag(
 
   // Inside an attribute value?
   for (const attr of el.attrs) {
-    if (attr.hasValue && offset >= attr.quoteStart && offset <= attr.quoteEnd) {
+    // An unterminated value (quoteEnd < 0) happens while the user is typing
+    // the opening quote of a new attribute value; it must still be treated as
+    // an attribute-value context so enum/ref/define completions show up.
+    if (
+      attr.hasValue &&
+      attr.quoteStart >= 0 &&
+      offset >= attr.quoteStart &&
+      (attr.quoteEnd < 0 || offset <= attr.quoteEnd)
+    ) {
       const start = attr.valueStart;
       const prefix = offset > start ? text.slice(start, offset) : "";
       return {
@@ -127,4 +135,21 @@ function empty(kind: ContextKind): CompletionContext {
     valuePrefix: "",
     existingAttrs: [],
   };
+}
+
+/**
+ * Splits the typed prefix of a whitespace-separated list value (xs:list, e.g.
+ * bit flags such as Surfaces="GROUND WATER") into the token being edited and
+ * the offset of that token inside the prefix.
+ *
+ * "GROUND WA" -> { token: "WA", start: 7 }
+ * "GROUND "   -> { token: "",  start: 7 }
+ * "WA"        -> { token: "WA", start: 0 }
+ */
+export function splitListValuePrefix(prefix: string): { token: string; start: number } {
+  let start = prefix.length;
+  while (start > 0 && !/\s/.test(prefix[start - 1])) {
+    start--;
+  }
+  return { token: prefix.slice(start), start };
 }

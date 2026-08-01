@@ -53,6 +53,31 @@ test("Include has reference/instance/all enum", () => {
   assert.deepEqual(type?.enumValues, ["reference", "instance", "all"]);
 });
 
+test("xs:list types expose their item enum and isList flag", () => {
+  const expected = [
+    "GROUND", "WATER", "CLIFF", "AIR", "RUBBLE", "OBSTACLE", "IMPASSABLE",
+    "DEEP_WATER", "WALL_RAILING", "CRUSHABLE_OBSTACLE", "CRUSHABLE_WALL",
+  ];
+  const flags = model.typeInfo("LocomotorSurfaceBitFlags");
+  assert.equal(flags.isList, true);
+  assert.deepEqual(flags.enumValues, expected);
+  const surfaces = model
+    .attributesOfType("LocomotorTemplate")
+    .find((a) => a.name === "Surfaces");
+  assert.equal(surfaces.isList, true);
+  assert.deepEqual(surfaces.enumValues, expected);
+});
+
+test("numeric list types do not invent enums", () => {
+  const list = model.typeInfo("SageUnsignedIntList");
+  assert.equal(list.isList, true);
+  assert.deepEqual(list.enumValues, []);
+  // Plain restriction enums keep isList=false.
+  const plain = model.typeInfo("Surface");
+  assert.equal(plain.isList, false);
+  assert.ok(plain.enumValues.length > 0);
+});
+
 test("foreign namespaces are excluded from XSD validation", () => {
   // XInclude elements (xi:include / xi:fallback) come from the W3C XInclude
   // namespace, not from the EA asset XSD.
