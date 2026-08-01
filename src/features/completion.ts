@@ -3,6 +3,7 @@ import { parseXml, type XmlElement } from "../language/xmlParser";
 import { analyzeContext, type CompletionContext } from "../language/context";
 import { resolveElementType } from "../language/typeContext";
 import * as model from "../model/schemaModel";
+import { isLocalReferenceAttribute } from "../indexer/refs";
 import type { ModWorkspace } from "../workspace";
 import type { ModIndex, AssetDef } from "../indexer/types";
 
@@ -225,6 +226,12 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     // inheritFrom: same element type first, then everything.
     if (attrName === "inheritfrom") {
       return this.assetIdItems(idx, el.name, null, prefix, make);
+    }
+
+    // `id` attributes are definitions and Poid attributes are pipeline-local
+    // references; offering global asset ids for them would be wrong.
+    if (attrInfo && isLocalReferenceAttribute(elType, attr.name)) {
+      return [];
     }
 
     if (attrInfo?.refType) {

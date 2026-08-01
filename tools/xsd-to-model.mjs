@@ -300,7 +300,13 @@ function collectAttributes(node, out = []) {
       doc: docOf(attr),
       kind: desc?.kind ?? "unknown",
       type: desc?.name ?? null,
-      refType: normalizeTypeName(desc?.refType) ?? null,
+      // xas:refType may be declared on the attribute itself (e.g.
+      // <xs:attribute name="id" type="Poid" xas:refType="ModuleData" />) or
+      // on its simple type. The attribute-level declaration wins.
+      refType:
+        normalizeTypeName(attr["@_refType"]) ??
+        normalizeTypeName(desc?.refType) ??
+        null,
       enumValues: desc?.enumValues ?? inlineEnum ?? [],
       allowsDefine: desc?.allowsDefine ?? false,
       isRef: desc?.isRef ?? false,

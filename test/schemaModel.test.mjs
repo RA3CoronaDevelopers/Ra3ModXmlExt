@@ -17,6 +17,36 @@ test("GameObject has expected attributes", () => {
   assert.ok(attrs.some((a) => a.name === "inheritFrom"));
 });
 
+test("attribute-level xas:refType is captured (module ids, map objects)", () => {
+  // ModuleData@id is declared as <xs:attribute name="id" type="Poid"
+  // xas:refType="ModuleData" />; the refType must reach every module subtype.
+  const moduleId = model.attributesOfType("ModuleData").find((a) => a.name === "id");
+  assert.equal(moduleId?.refType, "ModuleData");
+  assert.equal(
+    model.attributesOfType("W3DTruckDrawModuleData").find((a) => a.name === "id")?.refType,
+    "ModuleData",
+  );
+  // MapObject@id declares itself; ThingTemplate references a GameObject.
+  assert.equal(
+    model.attributesOfType("MapObject").find((a) => a.name === "id")?.refType,
+    "MapObject",
+  );
+  assert.equal(
+    model.attributesOfType("MapObject").find((a) => a.name === "ThingTemplate")?.refType,
+    "GameObject",
+  );
+  // RoadObject@id references a different global asset type (Road).
+  assert.equal(
+    model.attributesOfType("RoadObject").find((a) => a.name === "id")?.refType,
+    "Road",
+  );
+  // Poid pipeline-local references keep their typed targets.
+  assert.equal(
+    model.attributesOfType("AttachNugget").find((a) => a.name === "AttachModuleId")?.refType,
+    "ModuleData",
+  );
+});
+
 test("Include has reference/instance/all enum", () => {
   const attrs = model.attributesOfElement("Include");
   const type = attrs.find((a) => a.name === "type");

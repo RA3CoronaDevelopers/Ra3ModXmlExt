@@ -4,7 +4,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { ModIndexer } from "../out/indexer/indexer.js";
 import { CachedDirectoryWalker } from "../out/indexer/fileScanner.js";
-import { isReferenceAttribute, resolveReferenceTargets } from "../out/indexer/refs.js";
+import {
+  isLocalReferenceAttribute,
+  isReferenceAttribute,
+  isReferenceAttributeOfType,
+  resolveReferenceTargets,
+  resolveReferenceTargetsForType,
+} from "../out/indexer/refs.js";
+import { parseXml } from "../out/language/xmlParser.js";
+import { resolveElementType } from "../out/language/typeContext.js";
 import * as model from "../out/model/schemaModel.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -63,10 +71,21 @@ test("isReferenceAttribute distinguishes references from enums/paths", () => {
   assert.equal(isReferenceAttribute("FireWeaponNugget", "WeaponName"), true);
 });
 
-test("untyped references (isRef without refType) resolve to any declared id", () => {
-  // LocomotorSet/@Locomotor has type AssetReference: xas:isRef="true" with
-  // no refType. It must be treated as a reference and match the id regardless
-  // of the target asset type.
+test("attribute-level xas:refType is preserved in the model", () => {
+  // <xs:attribute name="Locomotor" type="AssetReference"
+  //                xas:refType="LocomotorTemplate" /> — the refType lives on
+  // the attribute node, not on the AssetReference simple type.
+  assert.equal(
+    model.attributesOfElement("LocomotorSet").find((a) => a.name === "Locomotor")?.refType,
+    "LocomotorTemplate",
+  );
+  assert.equal(
+    model.attributesOfElement("ArmorSet").find((a) => a.name === "Armor")?.refType,
+    "ArmorTemplate",
+  );
+});
+
+test("typed Locomotor references resolve only to LocomotorTemplate defs", () => {
   const idx = {
     assetsById: new Map([
       [
@@ -77,6 +96,14 @@ test("untyped references (isRef without refType) resolve to any declared id", ()
             id: "AlliedAntiVehicleVehicleTech1Locomotor",
             file: "Locomotor.xml",
             line: 5,
+            origin: "project",
+          },
+          {
+            // Same id under a different type must NOT satisfy the reference.
+            type: "GameObject",
+            id: "AlliedAntiVehicleVehicleTech1Locomotor",
+            file: "GameObject.xml",
+            line: 1,
             origin: "project",
           },
         ],
@@ -99,4 +126,93 @@ test("untyped references (isRef without refType) resolve to any declared id", ()
   assert.equal(targets[0].def.type, "LocomotorTemplate");
   // A non-reference attribute still returns nothing.
   assert.equal(resolveReferenceTargets(idx, "LocomotorSet", "EditorName", "X").length, 0);
+});
+
+test("module ids declare the element itself and are never global references", () => {
+  // The exact reported scenario: <TruckDraw id="ModuleTag_Draw"/> inside a
+  // GameObject. ModuleData@id carries xas:refType="ModuleData", which is the
+  // element's own base type -> a definition site, not a reference.
+  const xml = `
+<AssetDeclaration>
+  <GameObject id="GuardianTank">
+    <Draws>
+      <TruckDraw id="ModuleTag_Draw" />
+    </Draws>
+  </GameObject>
+</AssetDeclaration>`;
+  const doc = parseXml(xml);
+  const truckDraw = doc.elements.find((e) => e.name === "TruckDraw");
+  assert.ok(truckDraw);
+  const elType = resolveElementType(truckDraw);
+  assert.equal(elType, "W3DTruckDrawModuleData");
+  assert.equal(isLocalReferenceAttribute(elType, "id"), true);
+  assert.equal(isReferenceAttributeOfType(elType, "id"), false);
+  const idx = { assetsById: new Map(), assets: new Map(), defines: new Map() };
+  assert.equal(
+    resolveReferenceTargetsForType(idx, elType, "id", "ModuleTag_Draw").length,
+    0,
+  );
+});
+
+test("Poid attributes reference pipeline-local objects, not global assets", () => {
+  // AttachModuleId / ModuleId / AutoResolveBody are Poid-typed references to
+  // modules inside the same GameObject; the global index cannot judge them.
+  assert.equal(isReferenceAttributeOfType("AttachNugget", "AttachModuleId"), false);
+  assert.equal(isLocalReferenceAttribute("AttachNugget", "AttachModuleId"), true);
+  const idx = { assetsById: new Map(), assets: new Map(), defines: new Map() };
+  assert.equal(
+    resolveReferenceTargetsForType(idx, "AttachNugget", "AttachModuleId", "ModuleTag_X").length,
+    0,
+  );
+});
+
+test("cross-type id references (RoadObject@id -> Road) stay real references", () => {
+  // RoadObject declares its id with xas:refType="Road" (an AssetReference,
+  // NOT the element's own type), so it must keep reference semantics.
+  assert.equal(
+    model.attributesOfType("RoadObject").find((a) => a.name === "id")?.refType,
+    "Road",
+  );
+  assert.equal(isReferenceAttributeOfType("RoadObject", "id"), true);
+  const idx = {
+    assetsById: new Map([
+      [
+        "road01",
+        [
+          {
+            type: "Road",
+            id: "Road01",
+            file: "Roads.xml",
+            line: 3,
+            origin: "project",
+          },
+        ],
+      ],
+    ]),
+    assets: new Map(),
+    projectDir: ".",
+    sdkDir: ".",
+    defines: new Map(),
+    files: new Map(),
+    streams: [],
+    manifests: new Map(),
+    sourceCandidates: [],
+    diagnostics: [],
+    stats: {},
+  };
+  const targets = resolveReferenceTargetsForType(idx, "RoadObject", "id", "Road01");
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].def.type, "Road");
+});
+
+test("top-level asset ids with plain pipeline ids are not references", () => {
+  // LocomotorSet@id / ArmorSet@id are Poid pipeline ids without a refType:
+  // they identify the element and never need a global definition.
+  assert.equal(isReferenceAttributeOfType("LocomotorSet", "id"), false);
+  assert.equal(isReferenceAttributeOfType("ArmorTemplateSet", "id"), false);
+  const idx = { assetsById: new Map(), assets: new Map(), defines: new Map() };
+  assert.equal(
+    resolveReferenceTargetsForType(idx, "LocomotorSet", "id", "AnyLocalId").length,
+    0,
+  );
 });

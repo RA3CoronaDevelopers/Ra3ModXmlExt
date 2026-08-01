@@ -240,3 +240,85 @@ CommandSet 引用仍能解析到 LogicCommandSet 定义（无回归）
 - AttachTest 实机：三个原始场景全部按预期（Locomotor 命中 LocomotorTemplate、_SKN 命中 W3DContainer、cannon 双候选均可精确定位）。
 
 `.vsix` 已重新打包（13:33）。D 盘恢复后照旧可补跑 GenEvoTest / Corona 回归。
+
+---
+
+## 九、问题分析（第四轮，2026-08-01）：模块 `id` 被误报为未解析引用
+
+### 问题：`id="ModuleTag_Draw"` 误报 `Unresolved reference`
+
+**现象**：AttachTest `Allied Vehicle\Guardian Tank\GameObject.xml` 第 45 行
+
+```xml
+<TruckDraw
+    id="ModuleTag_Draw"
+    ...>
+```
+
+报 `Unresolved reference "ModuleTag_Draw" (not found in the current index)`，
+hover 同时显示 `No matching definition of the expected declared type...`。
+但该 id 是 TruckDraw（GameObject 模块）自身的标识，只在所属 `<GameObject />` 内部有效，
+此处就是定义处，全局资产索引中不存在（也不应存在）它的定义。
+
+**根因（两层叠加）**：
+
+1. **模型生成器丢失属性级 `xas:refType`**：`ModuleData@id` 在 XSD 中声明为
+
+   ```xml
+   <xs:complexType name="ModuleData" xas:isPolymorphic="true">
+     <xs:attribute name="id" type="Poid" xas:refType="ModuleData" />
+   </xs:complexType>
+   ```
+
+   refType 写在 `<xs:attribute>` 节点上，而 `tools/xsd-to-model.mjs` 只从 simple type
+   描述符读取 refType，属性级声明被丢弃。`Poid` 本身带 `xas:isWeakRef="true"`（“管线对象
+   ID”），于是该 id 在模型里变成 `{ type: "Poid", refType: null, isRef: true }`——一个
+   “无类型引用”，导致**所有继承自 ModuleData 的模块类型（以及 ObjectFilter、MapObject、
+   GameScript、AIStateTactic 等共 430 个类型）的 `id` 都被当作全局引用检查**。
+
+2. **`id` 的语义是“定义点”而非“引用”**：即便 refType 正确，嵌套元素（模块、nugget、
+   地图对象）的 `id` 也只是其局部标识，检查全局 unresolved 必然误报。反过来，XSD 里确有一类
+   真正引用其他资产类型的 `id`（如 `RoadObject@id` 为 `AssetReference` + `xas:refType="Road"`），
+   这类检查必须保留。
+
+**验证**：
+
+- 用未修改的生成器对当前 SDK XSD 重新生成模型，与仓库内模型逐字段一致（0 差异），
+  证明修复后重新生成的 diff 只落在属性级 refType 上，无无关噪音。
+- 修复后 `W3DTruckDrawModuleData@id` → `refType: ModuleData`；
+  `isReferenceAttributeOfType(...) === false`；空索引下 `TruckDraw@id` 不再产生诊断；
+  全文件扫描 0 个 `id` 误报，61 处真实引用属性（`inheritFrom`、`CommandSet`、`Side`、
+  `Locomotor`、`TrackMarks` 等）行为不变。
+
+**修复**：
+
+1. **生成器**（`tools/xsd-to-model.mjs`）：`collectAttributes` 改为
+   `attr["@_refType"] ?? desc?.refType`（属性级优先、simple type 兜底），重新生成
+   `schema-model.json`——共恢复 444 处 refType（含继承传播），`isRef` 与其他字段零变化。
+   附带收益：`Locomotor → LocomotorTemplate`、`Armor → ArmorTemplate`、
+   `ThingTemplate → GameObject` 等此前被当作“无类型引用”的属性恢复真实类型
+   （第三轮中 Locomotor“无 refType”的结论实为该生成器 bug 的误判）。
+2. **局部引用规则**（`src/indexer/refs.ts` 新增 `isLocalReferenceAttribute`）：
+   - `id`：无 refType，或 refType 与元素自身类型兼容（`isAssignableTo`，如
+     `W3DTruckDrawModuleData → ModuleData`）→ 定义点，不做全局引用检查；
+     refType 指向不同类型（`RoadObject@id → Road`）→ 保留真实引用检查；
+   - 非 `id` 且类型为 `Poid` 的属性（`ModuleId`、`AutoResolveBody`、`SoundRef`、
+     `AttachModuleId`…）→ 管线局部引用，全局索引无法判定，不检查。
+   `isReferenceAttributeOfType` 与 `resolveReferenceTargetsForType` 同步使用该守卫，
+   诊断 / hover / 跳转 / 补全行为一致。
+3. **补全**（`src/features/completion.ts`）：`id` 与 Poid 属性不再按 refType 提供
+   全局资产补全（模块 id 是局部的，全局资产列表是错误建议）。
+
+**测试（31 → 37，全部通过）**：
+
+- `refs.test.mjs`：TruckDraw 实景结构（GameObject → Draws → TruckDraw）下 `id` 不再是
+  引用且不解析；`RoadObject@id` 仍是引用并能解析到 Road；`AttachModuleId` 等 Poid 属性
+  不误报；Locomotor 改为严格类型引用（同名 GameObject 不再匹配）；
+- `schemaModel.test.mjs`：`ModuleData@id` / `MapObject@id` / `ThingTemplate` /
+  `RoadObject@id` / `AttachModuleId` 的属性级 refType 断言；
+- 回归：原有 31 个用例全部保持通过。
+
+> **后续可做**：GameObject 内模块 id 的“局部作用域”解析——`AttachModuleId`、
+> `ModuleId` 等模块引用指向同一 GameObject 内的兄弟模块，但部分引用（如武器上的
+> `AttachModuleId`）目标 GameObject 跨文件无法静态确定，本轮先统一不检查；待局部
+> 作用域建模落地后再启用这些引用的解析与诊断。

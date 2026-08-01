@@ -11,6 +11,37 @@ export interface ReferenceTarget {
 }
 
 /**
+ * True when an attribute is a "pipeline-local" reference that the global
+ * asset index cannot judge:
+ *
+ * - `id` attributes declare the element's own identity. When the attribute
+ *   has no refType (plain Poid / pipeline ids) or its refType is compatible
+ *   with the element's own type (e.g. ModuleData@id -> ModuleData), the
+ *   element itself is the definition site, so no global definition is
+ *   required. An `id` whose refType points at a *different* asset type
+ *   (e.g. RoadObject@id -> Road) is a real cross-asset reference and keeps
+ *   its reference semantics.
+ * - Poid-typed attributes (ModuleId, AutoResolveBody, SoundRef, ...) are
+ *   "pipeline object id" references that are resolved within the same
+ *   asset/subtree (modules, sub-objects, pivots, shader materials...),
+ *   never against the global asset index.
+ */
+export function isLocalReferenceAttribute(
+  typeName: string | null,
+  attrName: string,
+): boolean {
+  const attr = attributesOfType(typeName).find((a) => a.name === attrName);
+  if (!attr) return false;
+  const isId = attrName.toLowerCase() === "id";
+  if (isId) {
+    if (!attr.refType) return true;
+    if (typeName && isAssignableTo(typeName, attr.refType)) return true;
+    return false;
+  }
+  return attr.type === "Poid";
+}
+
+/**
  * True when an attribute is a typed reference: either the instance
  * inheritance attribute `inheritFrom`, or an XSD attribute whose simple type
  * carries an `xas:refType`. Enumerations and file paths (e.g.
@@ -27,7 +58,11 @@ export function isReferenceAttributeOfType(
 ): boolean {
   if (attrName.toLowerCase() === "inheritfrom") return true;
   const attr = attributesOfType(typeName).find((a) => a.name === attrName);
-  return attr != null && (attr.refType != null || attr.isRef);
+  if (attr == null || !(attr.refType != null || attr.isRef)) return false;
+  // Definitions (id) and pipeline-local references (Poid) are not references
+  // to global assets, so they never need a definition in the global index.
+  if (isLocalReferenceAttribute(typeName, attrName)) return false;
+  return true;
 }
 
 /**
@@ -73,6 +108,9 @@ export function resolveReferenceTargetsForType(
   } else {
     const attr = attributesOfType(typeName).find((a) => a.name === attrName);
     if (!attr || (!attr.refType && !attr.isRef)) return [];
+    // id definitions and Poid pipeline-local references are never resolved
+    // against the global asset index.
+    if (isLocalReferenceAttribute(typeName, attrName)) return [];
     refType = attr.refType;
   }
 
