@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+	<W3DContainer id="Tank_SKN" Hierarchy="Tank_SKL" />
+	<W3DHierarchy id="Tank_SKL" />
+</AssetDeclaration>

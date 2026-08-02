@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseXml, findElementAt } from "../out/language/xmlParser.js";
+import { parseXml, findElementAt, stripBom } from "../out/language/xmlParser.js";
+
+test("stripBom removes a leading UTF-8 byte-order mark", () => {
+  assert.equal(stripBom("\uFEFF<A/>"), "<A/>");
+  assert.equal(stripBom("<A/>"), "<A/>");
+});
 
 test("parses elements, attributes and positions", () => {
   const text = `<AssetDeclaration xmlns="uri:ea.com:eala:asset">\n\t<GameObject id="X" KindOf="A B"/>\n</AssetDeclaration>`;

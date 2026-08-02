@@ -66,6 +66,14 @@ export interface Position {
   character: number;
 }
 
+/**
+ * Removes a leading UTF-8 byte-order mark (U+FEFF) so source offsets match
+ * the text as editors expose it (VS Code strips the BOM from document text).
+ */
+export function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 /** Precomputes line start offsets for offset <-> position conversion. */
 export class LineMap {
   private lineStarts: number[] = [0];

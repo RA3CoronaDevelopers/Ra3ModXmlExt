@@ -1,0 +1,2 @@
+This is a fake DDS payload used to verify that binary assets included from
+an XML hub are registered as files but never parsed as XML.

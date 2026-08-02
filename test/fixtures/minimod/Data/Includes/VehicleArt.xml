@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+	<Includes>
+		<Include type="all" source="Models/Tank_SKN.w3x" />
+		<Include type="all" source="Models/Tank_FP.w3d" />
+		<Include type="all" source="Models/Tank_Damaged.dds" />
+	</Includes>
+</AssetDeclaration>

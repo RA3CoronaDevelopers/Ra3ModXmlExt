@@ -1,6 +1,17 @@
 import { readdir, stat } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { extname, join, relative, resolve } from "node:path";
 import type { FileWalker, SourceCandidate } from "./types";
+
+/**
+ * Extensions offered as Include/@source candidates in DATA directories:
+ * regular XML plus art-asset XML (.w3x) that mods include via W3X.xml hubs.
+ * ART/AUDIO directories already list every file.
+ */
+const DATA_CANDIDATE_EXTENSIONS = new Set([".xml", ".w3x"]);
+
+function isDataCandidate(path: string): boolean {
+  return DATA_CANDIDATE_EXTENSIONS.has(extname(path).toLowerCase());
+}
 
 /**
  * Recursive file list walker with a simple directory-mtime cache. Used to
@@ -79,13 +90,13 @@ export async function collectSourceCandidates(
   for (const dir of dataDirs) {
     const files = await walker.listFiles(dir);
     for (const f of files) {
-      if (!f.toLowerCase().endsWith(".xml")) continue;
+      if (!isDataCandidate(f)) continue;
       add(f, dir, "DATA");
     }
     if (samePath(dir, projectDataDir)) {
       // Also offer project-relative paths (what Mod.xml itself uses).
       for (const f of files) {
-        if (f.toLowerCase().endsWith(".xml")) add(f, projectDataDir, null);
+        if (isDataCandidate(f)) add(f, projectDataDir, null);
       }
     }
   }

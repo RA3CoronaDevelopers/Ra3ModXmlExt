@@ -18,6 +18,11 @@
 - **引用导航**：从引用值（`CommandSet="..."`、`Weapon="..."`、`inheritFrom`）跳转到定义（严格按引用类型过滤，候选由 `ra3modxml.definitionMode` 控制：`all` 列出 mod + 原版、`project-only` 优先项目内定义）；`Ctrl+点击` Include / `xi:include href` 打开目标文件；Find All References 搜索整个工作区；文档大纲列出顶层资产与 `$DEFINE`。
 - **错误检查**：XML 格式错误、未知元素/属性（`xi:` 等外来命名空间不误报）、顶层资产缺 `id`、重复 ID、未解析引用（含类型不匹配）、Include / 嵌套 `xi:include` 目标找不到、`$DEFINE` 未定义。
 - **manifest 支持**：`<Include type="reference">` 指向的 `static/global/audio.manifest`（SDK `builtmods`）会被解析，manifest 中的原版资产 ID 可用于补全/悬停/导航/诊断。
+- **美术资产（`.w3x`）**：`W3X.xml` / `ART:` include 链中的 `.w3x` 模型文件会被
+  索引（`W3DContainer` / `W3DMesh` / `W3DHierarchy` 等顶层资产），因此
+  `Model@Name`、`Hierarchy`、`Mesh` 等引用可以解析、悬停与跳转。超大模型
+  （几十 MB 的顶点/三角形数据）采用浅扫描——只提取顶层资产记录、不建 DOM 树，
+  结果在 workspace 级缓存并跨重建复用，保存文件触发的重建不会重读未变化的模型文件。
 
 ## 使用
 
@@ -72,6 +77,8 @@ src/
     manifestParser.ts     .manifest 二进制解析（移植 OpenSAGE ManifestFile.cs）
     fileScanner.ts        目录扫描与 Include source 候选
     refs.ts               引用目标解析（按引用类型过滤）
+    shallowScan.ts        .w3x 等大体积美术资产顶层浅扫描（纯 TS，不建 DOM）
+    caches.ts             跨重建持久缓存（DocumentCache / ShallowScanCache）
     indexer.ts            工作区索引器（后台、缓存、增量重建）
   features/               completion / hover / navigation / diagnostics / semanticTokens
 syntaxes/                 TextMate 注入语法

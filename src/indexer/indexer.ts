@@ -11,9 +11,15 @@
  * outside the extension.
  */
 
-import { readFile, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import { LineMap, parseXml, type XmlDocument, type XmlElement } from "../language/xmlParser";
+import {
+  LineMap,
+  parseXml,
+  stripBom,
+  type XmlDocument,
+  type XmlElement,
+} from "../language/xmlParser";
 import {
   buildSearchPaths,
   manifestPathForReference,
@@ -28,6 +34,8 @@ import {
 } from "./manifestParser";
 import { canonicalTypeName } from "../model/schemaModel";
 import { collectSourceCandidates } from "./fileScanner";
+import { DocumentCache, ShallowScanCache, normKey } from "./caches";
+import { scanXmlShallow } from "./shallowScan";
 import type {
   AssetDef,
   DefineDef,
@@ -42,54 +50,27 @@ import type {
 const MAX_DEPTH = 300;
 /** Files above this size are never parsed (safety against binary blobs). */
 const MAX_PARSE_BYTES = 4 * 1024 * 1024;
-/** Only these extensions are treated as XML documents. */
-const XML_EXTENSIONS = new Set([".xml", ".manifestxml"]);
-
-function normKey(path: string): string {
-  return resolve(path).toLowerCase();
-}
-
 /**
- * LRU cache for parsed documents. The parse trees of huge mods can be
- * memory-heavy, so only a bounded number of recent documents is retained;
- * evicted entries are re-read from disk on demand.
+ * Fully parsed XML documents. `.xml` / `.manifestxml` files are small enough
+ * that a full DOM is affordable.
  */
-export class DocumentCache {
-  private map = new Map<string, ParsedFile>();
+const FULL_XML_EXTENSIONS = new Set([".xml", ".manifestxml"]);
+/**
+ * XML documents whose top-level structure is all the index needs (art-asset
+ * files exported by modeling tools, e.g. .w3x). They are shallow-scanned so
+ * multi-megabyte vertex/triangle payloads never become a DOM.
+ */
+const SHALLOW_XML_EXTENSIONS = new Set([".w3x"]);
+/** Bytes peeked when deciding whether an unknown extension is XML text. */
+const SNIFF_BYTES = 512;
 
-  constructor(private capacity = 64) {}
-
-  get(path: string): ParsedFile | undefined {
-    const key = normKey(path);
-    const hit = this.map.get(key);
-    if (!hit) return undefined;
-    this.map.delete(key);
-    this.map.set(key, hit);
-    return hit;
-  }
-
-  set(parsed: ParsedFile): void {
-    const key = normKey(parsed.file.path);
-    this.map.delete(key);
-    this.map.set(key, parsed);
-    if (this.map.size > this.capacity) {
-      const oldest = this.map.keys().next().value;
-      if (oldest !== undefined) this.map.delete(oldest);
-    }
-  }
-
-  invalidate(path: string): void {
-    this.map.delete(normKey(path));
-  }
-
-  clear(): void {
-    this.map.clear();
-  }
-}
+type XmlMode = "full" | "shallow" | "binary";
 
 export class ModIndexer {
   private searchPaths: SearchPaths;
-  private docs = new DocumentCache();
+  private docs: DocumentCache;
+  private shallowDocs: ShallowScanCache;
+  private scanCounters = { shallowScannedFiles: 0, shallowCacheHits: 0 };
   private assets = new Map<string, Map<string, AssetDef[]>>();
   private assetsById = new Map<string, AssetDef[]>();
   private defines = new Map<string, DefineDef[]>();
@@ -106,40 +87,122 @@ export class ModIndexer {
     this.searchPaths = buildSearchPaths(opts.sdkDir, opts.projectDir, {
       DATA: opts.additionalDataSearchPaths,
     });
+    // Caches may be owned by the workspace so they survive rebuilds.
+    this.docs = opts.documentCache ?? new DocumentCache();
+    this.shallowDocs = opts.shallowCache ?? new ShallowScanCache();
   }
 
-  /** Re-reads and caches a document; null when unreadable. */
+  /**
+   * Returns a document for indexing/navigation:
+   * - `.xml` / `.manifestxml` files are fully parsed (bounded by
+   *   MAX_PARSE_BYTES);
+   * - `.w3x` (and unknown-extension files whose content looks like XML) are
+   *   shallow-scanned, so huge model files never become a DOM;
+   * - everything else is registered as a file but never parsed.
+   *
+   * Cached entries are reused when the file stat is unchanged, which lets a
+   * workspace-owned cache survive rebuilds.
+   */
   async readDocument(path: string): Promise<ParsedFile | null> {
-    const hit = this.docs.get(path);
-    if (hit) return hit;
+    const key = normKey(path);
+    const mode = await this.detectXmlMode(path);
+    if (mode === "shallow") return this.scanShallow(path);
+    if (mode === "binary") {
+      try {
+        const st = await stat(path);
+        const file: IndexedFile = { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } };
+        this.files.set(key, file);
+        return { file, parse: null, shallow: null, lineMap: null };
+      } catch {
+        const file: IndexedFile = { path: resolve(path), stat: null };
+        this.files.set(key, file);
+        return { file, parse: null, shallow: null, lineMap: null };
+      }
+    }
     try {
-      const [st, text] = await Promise.all([stat(path), readFile(path, "utf8")]);
+      const st = await stat(path);
+      const hit = this.docs.get(key);
+      if (
+        hit?.file.stat &&
+        hit.file.stat.mtimeMs === st.mtimeMs &&
+        hit.file.stat.size === st.size
+      ) {
+        this.files.set(key, hit.file);
+        return hit;
+      }
       if (st.size > MAX_PARSE_BYTES) {
         const file: IndexedFile = { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } };
-        const parsed: ParsedFile = { file, parse: null, lineMap: null };
+        const parsed: ParsedFile = { file, parse: null, shallow: null, lineMap: null };
         this.docs.set(parsed);
-        this.files.set(normKey(parsed.file.path), file);
+        this.files.set(key, file);
         return parsed;
       }
+      const text = stripBom(await readFile(path, "utf8"));
       const parse = parseXml(text);
       const parsed: ParsedFile = {
         file: { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } },
         parse,
+        shallow: null,
         lineMap: new LineMap(text),
       };
       this.docs.set(parsed);
-      this.files.set(normKey(parsed.file.path), parsed.file);
+      this.files.set(key, parsed.file);
       return parsed;
     } catch {
       const parsed: ParsedFile = {
         file: { path: resolve(path), stat: null },
         parse: null,
+        shallow: null,
         lineMap: null,
       };
       this.docs.set(parsed);
-      this.files.set(normKey(parsed.file.path), parsed.file);
+      this.files.set(key, parsed.file);
       return parsed;
     }
+  }
+
+  /**
+   * Shallow-scans a large art-asset XML document (no DOM built) and caches
+   * the top-level records. Cache hits are counted separately so tests and
+   * the index report can verify that rebuilds skip unchanged files.
+   */
+  private async scanShallow(path: string): Promise<ParsedFile | null> {
+    const key = normKey(path);
+    try {
+      const st = await stat(path);
+      const hit = this.shallowDocs.get(key);
+      if (
+        hit?.file.stat &&
+        hit.file.stat.mtimeMs === st.mtimeMs &&
+        hit.file.stat.size === st.size
+      ) {
+        this.scanCounters.shallowCacheHits++;
+        this.files.set(key, hit.file);
+        return hit;
+      }
+      const text = stripBom(await readFile(path, "utf8"));
+      const shallow = scanXmlShallow(text);
+      const parsed: ParsedFile = {
+        file: { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } },
+        parse: null,
+        shallow,
+        lineMap: new LineMap(text),
+      };
+      this.shallowDocs.set(parsed);
+      this.files.set(key, parsed.file);
+      this.scanCounters.shallowScannedFiles++;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Decides how a resolved include target should be consumed. */
+  private async detectXmlMode(path: string): Promise<XmlMode> {
+    const ext = extname(path).toLowerCase();
+    if (FULL_XML_EXTENSIONS.has(ext)) return "full";
+    if (SHALLOW_XML_EXTENSIONS.has(ext)) return "shallow";
+    return (await looksLikeXml(path)) ? "shallow" : "binary";
   }
 
   /** Returns the cached parse if present (does not read from disk). */
@@ -253,6 +316,8 @@ export class ModIndexer {
         parsedFiles: [...this.files.values()].filter(
           (f) => f.stat != null && f.stat.size <= MAX_PARSE_BYTES,
         ).length,
+        shallowScannedFiles: this.scanCounters.shallowScannedFiles,
+        shallowCacheHits: this.scanCounters.shallowCacheHits,
         assetCount: [...this.assets.values()].reduce((sum, byId) => sum + byId.size, 0),
         defineCount: this.defines.size,
         manifestFiles: this.manifests.size,
@@ -294,11 +359,15 @@ export class ModIndexer {
 
     stream.files.add(key);
 
-    // Binary assets (w3x/dds/...) are referenced but never parsed.
-    if (!isXmlPath(path)) return;
-
+    // readDocument handles every mode: full XML parse, shallow scan for
+    // art-asset XML (.w3x / content-sniffed), or binary registration only.
     const parsed = await this.readDocument(path);
-    if (!parsed?.parse?.root) return;
+    if (!parsed) return;
+    if (parsed.shallow) {
+      await this.walkShallow(parsed, stream, depth, mode === "instance");
+      return;
+    }
+    if (!parsed.parse?.root) return;
     const root = parsed.parse.root;
 
     for (const child of root.children) {
@@ -366,12 +435,12 @@ export class ModIndexer {
           const manifestPath = manifestPathForReference(source, this.opts.builtmodsDirs);
           if (manifestPath) {
             const loaded = await this.loadManifest(manifestPath, stream.name);
-            if (!loaded && isXmlPath(resolved.path)) {
+            if (!loaded) {
               // The manifest could not be parsed (missing/invalid): fall back
-              // to the placeholder XML so its content is still available.
+              // to the placeholder target so its content is still available.
               await this.walk(resolved.path, "instance", stream, depth + 1);
             }
-          } else if (isXmlPath(resolved.path)) {
+          } else {
             // reference to a real XML file: treat its assets as available
             await this.walk(resolved.path, "instance", stream, depth + 1);
           }
@@ -400,7 +469,95 @@ export class ModIndexer {
         continue;
       }
       stream.files.add(normKey(resolved.path));
-      if (isXmlPath(resolved.path)) {
+      if ((await this.detectXmlMode(resolved.path)) !== "binary") {
+        await this.walk(resolved.path, "all", stream, depth + 1);
+      }
+    }
+  }
+
+  /**
+   * Consumes a shallow-scanned art-asset document: top-level assets,
+   * top-level <Includes>, <Defines> and nested <xi:include> targets.
+   */
+  private async walkShallow(
+    parsed: ParsedFile,
+    stream: StreamInfo,
+    depth: number,
+    viaInstance: boolean,
+  ): Promise<void> {
+    const scan = parsed.shallow;
+    if (!scan) return;
+    const file = parsed.file.path;
+
+    for (const asset of scan.assets) {
+      this.addAsset({
+        type: asset.name,
+        id: asset.id,
+        file,
+        line: lineOf(parsed, asset.idValueStart),
+        origin: this.originOf(file),
+        stream: stream.name,
+        viaInstance,
+      });
+    }
+
+    for (const define of scan.defines) {
+      const entry: DefineDef = {
+        name: define.name,
+        value: define.value,
+        file,
+        line: lineOf(parsed, define.start),
+        origin: this.originOf(file),
+      };
+      const arr = this.defines.get(define.name.toLowerCase());
+      if (arr) arr.push(entry);
+      else this.defines.set(define.name.toLowerCase(), [entry]);
+    }
+
+    for (const inc of scan.includes) {
+      const resolved = resolveSource(inc.source, dirname(file), this.searchPaths);
+      if (!resolved.path) {
+        this.diagnostics.push({
+          file,
+          line: lineOf(parsed, inc.start),
+          message: `Include target not found: ${inc.source}`,
+          severity: "warning",
+          code: "include-not-found",
+        });
+        continue;
+      }
+      if (inc.type === "all" || inc.type === "instance") {
+        await this.walk(
+          resolved.path,
+          inc.type === "all" ? "all" : "instance",
+          stream,
+          depth + 1,
+        );
+      } else if (inc.type === "reference") {
+        const manifestPath = manifestPathForReference(inc.source, this.opts.builtmodsDirs);
+        if (manifestPath) {
+          const loaded = await this.loadManifest(manifestPath, stream.name);
+          if (!loaded) await this.walk(resolved.path, "instance", stream, depth + 1);
+        } else {
+          await this.walk(resolved.path, "instance", stream, depth + 1);
+        }
+      }
+    }
+
+    for (const xi of scan.xiIncludes) {
+      const resolved = resolveSource(xi.href, dirname(file), this.searchPaths);
+      if (!resolved.path) {
+        this.diagnostics.push({
+          file,
+          line: lineOf(parsed, xi.start),
+          message: `xi:include target not found: ${xi.href}`,
+          severity: "warning",
+          code: "include-not-found",
+        });
+        continue;
+      }
+      stream.files.add(normKey(resolved.path));
+      if ((await this.detectXmlMode(resolved.path)) !== "binary") {
         await this.walk(resolved.path, "all", stream, depth + 1);
       }
     }
@@ -425,9 +582,17 @@ export class ModIndexer {
       });
       return;
     }
-    if (!isXmlPath(resolved.path)) return;
+    if ((await this.detectXmlMode(resolved.path)) === "binary") return;
     const target = await this.readDocument(resolved.path);
-    if (!target?.parse?.root) return;
+    if (!target) return;
+    if (target.shallow) {
+      // Shallow-scanned targets have no tree to select xpointer children
+      // from; index their top-level content as a whole.
+      stream.files.add(normKey(target.file.path));
+      await this.walk(target.file.path, "all", stream, depth + 1);
+      return;
+    }
+    if (!target.parse?.root) return;
 
     const xpointer = xi.attrs.find((a) => a.name === "xpointer")?.value ?? "";
     let candidates: XmlElement[];
@@ -551,9 +716,32 @@ function lineOf(parsed: ParsedFile, offset: number): number {
   return parsed.lineMap.positionAt(offset).line + 1;
 }
 
-function isXmlPath(path: string): boolean {
-  const ext = extname(path).toLowerCase();
-  return XML_EXTENSIONS.has(ext);
+/**
+ * Content sniffing for include targets with unknown extensions (e.g. art
+ * formats beyond .w3x): a small header that starts with "<" after an
+ * optional UTF-8 BOM / whitespace and contains no NUL bytes is treated as
+ * XML text; anything else is a binary asset (registered, never parsed).
+ */
+async function looksLikeXml(path: string): Promise<boolean> {
+  try {
+    const fh = await open(path, "r");
+    try {
+      const buf = Buffer.alloc(SNIFF_BYTES);
+      const { bytesRead } = await fh.read(buf, 0, SNIFF_BYTES, 0);
+      const head = buf.subarray(0, bytesRead);
+      if (head.includes(0)) return false;
+      let i = 0;
+      if (head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf) i = 3;
+      while (i < head.length && (head[i] === 0x20 || head[i] === 0x09 || head[i] === 0x0a || head[i] === 0x0d)) {
+        i++;
+      }
+      return i < head.length && head[i] === 0x3c; // "<"
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return false;
+  }
 }
 
 async function findCaseInsensitiveDir(dir: string): Promise<string | null> {

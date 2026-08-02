@@ -85,7 +85,9 @@ src/
     manifestParser.ts  .manifest 二进制解析 + 类型/ID 推导（纯 TS）
     fileScanner.ts     目录遍历缓存 + Include source 候选收集
     refs.ts            引用目标解析（按 refType / isRef / inheritFrom 过滤，纯 TS）
-    indexer.ts         工作区索引器（资产/Define/流/manifest 合并，LRU 解析缓存）
+    shallowScan.ts     大体积美术资产（.w3x 等）顶层浅扫描（纯 TS，不建 DOM）
+    caches.ts          跨重建持久缓存（DocumentCache / ShallowScanCache）
+    indexer.ts         工作区索引器（资产/Define/流/manifest/w3x 合并）
     types.ts           共享类型
   features/
     completion.ts      补全 provider（元素/属性/值，上下文感知；xs:list 多值按当前段过滤）
@@ -109,6 +111,11 @@ test/
 
 1. **语言激活范围**：不劫持 `*.xml`。通过 `workspaceContains:**/Data/Mod.xml`、`**/*.babproj` 激活；语法高亮为**纯注入** grammar（不声明 `language`，避免覆盖内置 XML 语法）。
 2. **索引范围与默认值**：索引“项目 Data + additionalmaps + 沿 include 可达的 SageXml 原版源码”；SDK 路径默认 `C:\Apps\RA3-MODSDK-X`（可配置）。`reference` include 解析为 `builtmods` 下对应 manifest（惰性解析、按文件缓存），manifest 缺失/无效时回退到占位 XML。
+   **美术资产（.w3x）**：`<Include type="all">` / `ART:` 指向的 `.w3x`（及内容嗅探为
+   XML 的未知扩展名文件）按其顶层资产入库（`W3DContainer` / `W3DMesh` /
+   `W3DHierarchy` / `W3DCollisionBox` 等），使 `Model@Name`、`Hierarchy`、`Mesh`
+   等引用可解析；大模型文件**浅扫描**（不建 DOM），结果缓存在 workspace 级、
+   跨重建复用（详见设计决策 14）。
 3. **manifest 资产建模**：类型优先用哈希表，未知时从名称前缀推导；可引用 ID 取最后冒号段；类型名统一走大小写规范化（`W3dContainer` ↔ `W3DContainer`），类型匹配严格遵循 XSD 继承链。
 4. **上下文感知元素类型**：同名元素按父元素类型解析（`resolveElementType` 沿解析树逐层 `childTypeOf`，失败回退全局映射），保证 `<Weapon>` 等元素的属性/引用判定正确。
 5. **引用判定与解析**：`refType` 或 `isRef` 均视为引用；带 `refType` 时严格按类型过滤（同名 ID 不串类型）；`inheritFrom` 按可继承类型过滤。**局部作用域例外**（`isLocalReferenceAttribute`）：`id` 是元素自身的定义点——无 refType 或 refType 与自身类型兼容时不检查、不解析（`RoadObject@id→Road` 这类跨类型 id 引用保留检查）；Poid 类型属性是管线局部引用，全局索引无法判定，不检查、不解析。
@@ -128,6 +135,20 @@ test/
     XML 编辑器皆然）；扩展注册 `DocumentSemanticTokensProvider`，仅当解析报错时用
     语义 token 覆盖标签名 / 属性名 / 属性值（标准 token 类型 `type` / `property` /
     `string`，主题自带配色）。合法文件返回空，观感与纯 TextMate 完全一致。
+14. **大体积美术资产浅扫描 + 跨重建持久缓存**（第八轮，2026-08-02）：
+    - 实测 Corona：3788 个 w3x / 2.64 GB，163 个超过 4 MB，最大 22.8 MB；大文件是
+      `W3DHierarchy` + 若干 `W3DMesh`（`Vertices/V`、`Triangles/T` 等 unbounded 数值
+      载荷），顶层记录通常只有几个到二十几个。
+    - 全量解析内存放大约 17 倍（6.3 MB 文本 → +109 MB DOM），不可接受；`scanXmlShallow`
+      单次线性扫描只提取顶层 `name+id`、`<Includes>`、`<xi:include>`、`<Defines>`，
+      22 MB 文件 ~600 ms、保留内存≈0。
+    - 索引按扩展名三分：`.xml`/`.manifestxml` 全量解析（4 MB 上限不变）；`.w3x` 浅扫描；
+      未知扩展名嗅探文件头（`<` 开头、无 NUL）决定按 XML 浅扫描或二进制登记。
+    - `DocumentCache` / `ShallowScanCache` 由 `ModWorkspace` 持有，每次重建传入新的
+      `ModIndexer`；按 `mtimeMs + size` 校验，未变化不重读。Corona 第二次构建
+      w3x 重扫数为 0（4,829 次缓存命中）。
+    - 读取整个文件不可避免（顶层边界需要全量扫描），但建 DOM 不是；优化的是
+      "不分配子节点对象"与"跨重建不重读"，两者叠加后方案可行。
 
 ## 三、实施步骤
 
@@ -136,22 +157,25 @@ test/
 3. [x] 生成模型：`schema-model.json`（XSD，295 顶层元素 / 1851 类型）与 `asset-types.json`（79 个 AssetType 哈希）。
 4. [x] 纯 TS 核心：include 解析、manifest 解析、XML 解析封装、索引器、引用解析。
 5. [x] 功能层：补全、hover、导航、诊断、大纲、高亮 grammar。
-6. [x] 单测（fixture Mod，53 个用例全绿：含 xs:list 枚举、未闭合引号恢复、list 多值
+6. [x] 单测（fixture Mod，63 个用例全绿：含 xs:list 枚举、未闭合引号恢复、list 多值
    分段、带 vscode stub 的补全集成、语义 token 兜底）+ 编译 + `vsce package` 打包
    （ra3-mod-xml-0.1.0.vsix，约 495KB）。
-7. [x] 在 AttachTest / GenEvoTest / Corona 上做冒烟验证，并按真实项目反馈修复问题（详见 `docs/analysis-issues.md` 六轮分析）。
+7. [x] 在 AttachTest / GenEvoTest / Corona 上做冒烟验证，并按真实项目反馈修复问题（详见 `docs/analysis-issues.md` 八轮分析）。
+8. [x] w3x 美术资产索引（第八轮）：新增 `shallowScan.ts` / `caches.ts`，w3x 与内容嗅探
+   XML 走浅扫描，Include source 补全候选加入 w3x，BOM 剥离，缓存跨重建持久化；
+   AttachTest 报错场景（`AUGunship_SKN`）修复，Corona 首次/二次构建实测验证。
 
 ## 四、验证结果（实测）
 
 | 项目 | 规模 | 索引耗时 | 资产数 | 说明 |
 |---|---|---|---|---|
-| AttachTest | 71 文件 | ~0.6s | 35,546（manifest 35,322） | 2 个流（static + mapmetadata） |
-| GenEvoTest | 24 文件 | ~1.8s | 35,392（manifest 35,322） | 项目 ID（alliedmcv 等）正确收录 |
-| Corona | 3,448 文件（+ 非 XML 资产路径） | ~54.5s | 55,305（manifest 35,322） | 3 个流、183 个 Define、0 诊断 |
+| AttachTest | 88 文件 | ~1.2s | 35,607（manifest 35,322，w3x 浅扫 62） | 2 个流（static + mapmetadata）；二次构建 354ms / 62 缓存命中 |
+| GenEvoTest | 66 文件 | 首次 ~2.6s / 二次 ~0.4s | 35,502（manifest 35,322，w3x 浅扫 38） | 2 个流、73 个 Define；二次构建 0 重扫 / 38 缓存命中 |
+| Corona | 8,976 文件 | 首次 ~241s / 二次 ~38s | 64,868（manifest 35,322，w3x 浅扫 4,829） | 3 个流、183 个 Define、0 诊断；二次构建 0 重扫 / 4,829 缓存命中 |
 
 单元测试覆盖：XML 解析（自闭合/容错/偏移/未闭合引号行尾恢复）、补全上下文（未闭合引号仍为 attribute-value、list 多值分段）、补全集成（vscode stub 下 `LocomotorTemplate@Surfaces` 未闭合引号枚举补全、空格后第二段过滤与替换范围）、语义 token（标签/属性/值范围、合法文档返回空、malformed 返回兜底 token）、include 解析（BAB 顺序、SDK 根优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、`childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list` 枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中 manifest 的 `PlayerTemplate`）。
 
-> 注：`D:\Mods\CoronaMod` 位于移动硬盘，当前未连接；GenEvoTest / Corona 的回归需在 D: 盘可用时补跑（用户会另行通知）。
+> 注：D: 盘移动硬盘已恢复连接；Corona 已按上述新数据回归（第八轮）。
 
 ## 五、假设与开放问题
 

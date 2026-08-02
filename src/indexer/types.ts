@@ -1,6 +1,8 @@
 import type { XmlDocument } from "../language/xmlParser";
 import type { ManifestInfo } from "./manifestParser";
 import type { LineMap } from "../language/xmlParser";
+import type { ShallowDocument } from "./shallowScan";
+import type { DocumentCache, ShallowScanCache } from "./caches";
 
 export type AssetOrigin = "project" | "sdk" | "manifest";
 
@@ -65,6 +67,10 @@ export interface IndexStats {
   sdkDir: string;
   indexedFiles: number;
   parsedFiles: number;
+  /** Art-asset documents indexed via shallow scan (no DOM tree). */
+  shallowScannedFiles: number;
+  /** Shallow scans served from the persistent cache (unchanged files). */
+  shallowCacheHits: number;
   assetCount: number;
   defineCount: number;
   manifestFiles: number;
@@ -102,6 +108,10 @@ export interface IndexOptions {
   additionalDataSearchPaths: string[];
   /** Directory walker used to enumerate files for source completion. */
   walker: FileWalker;
+  /** Optional parse-tree cache shared across rebuilds (owned by the workspace). */
+  documentCache?: DocumentCache;
+  /** Optional shallow-scan cache shared across rebuilds (owned by the workspace). */
+  shallowCache?: ShallowScanCache;
 }
 
 export interface FileWalker {
@@ -121,5 +131,10 @@ export interface ParseCache {
 export interface ParsedFile {
   file: IndexedFile;
   parse: XmlDocument | null;
+  /**
+   * Shallow records for large art-asset XML documents (.w3x etc.); null for
+   * fully parsed XML and for binary files.
+   */
+  shallow: ShallowDocument | null;
   lineMap: LineMap | null;
 }

@@ -70,6 +70,14 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
   - `TypeId` 哈希 → 类型名的映射来自 OpenSAGE 的 `AssetType` 枚举（本工作区可提取）；
   - 资产名与源文件名各自存放在独立的空字符结尾字符串缓冲区中。
 
+**补充（美术资产 `.w3x` 索引）**：
+- `W3X.xml` / `ART:` include 链中的 `.w3x` 是文本 XML（建模工具导出，BAB 同样按
+  XML 编译），其顶层资产（`W3DContainer` / `W3DMesh` / `W3DHierarchy` 等）应参与
+  补全、悬停、导航与诊断——`Model@Name`、`Hierarchy`、`Mesh` 等引用依赖这些定义；
+- 大模型文件（实测 Corona 最大 22.8 MB，顶点/三角形数据占大头）采用**顶层浅扫描**
+  （不建 DOM 树），结果在 workspace 级缓存并跨重建复用，避免每次保存都重读整个
+  美术资产目录（Corona 约 2.6 GB）。
+
 ### P1：非近期目标（本期不做，但预留扩展点）
 
 6. **高效搜索**：Mod 项目巨大（Corona 约 7500 个 XML、38MB）时直接全文搜索很慢，需要一个高效的 XML 内容索引机制。

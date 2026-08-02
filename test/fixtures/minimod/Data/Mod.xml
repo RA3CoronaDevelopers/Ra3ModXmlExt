@@ -9,5 +9,6 @@
 		<Include type="all" source="Includes/Weapons.xml" />
 		<Include type="all" source="Includes/Shared.xml" />
 		<Include type="all" source="Includes/Refs.xml" />
+		<Include type="all" source="Includes/VehicleArt.xml" />
 	</Includes>
 </AssetDeclaration>

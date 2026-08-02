@@ -590,3 +590,98 @@ token：文档出现解析错误时，由插件用自己的容错解析树继续
   配色，可能与 TextMate XML 配色略有差异——只在打字过程中出现，可接受；
 - 未实现 `provideDocumentSemanticTokensEdits`（delta 版本），每次全量计算；单文件
   解析在 KB 级，开销可忽略。
+
+---
+
+## 十三、问题分析（第八轮，2026-08-02）：`.w3x` 美术资产未被索引（AUGunship_SKN）
+
+### 问题
+
+AttachTest `Harbinger Gunship\GameObject.xml` 中 `<Model Name="AUGunship_SKN"/>`
+报两条错误：
+
+1. Problems 面板诊断：`Unresolved reference "AUGunship_SKN" (not found in the current index)`
+   （`unresolved-reference`，来自 `features/diagnostics.ts`）；
+2. 悬停提示：`No matching definition of type BaseRenderAssetType in the current index
+   (may exist in a compiled manifest or vanilla data).`（来自 `features/hover.ts`）。
+
+两条是同一缺失定义的两种呈现（诊断 + hover），不是两个独立 bug。
+`W3DContainer:AUGunship_SKN` 确实由 mod 定义——但定义在
+`Harbinger Gunship\W3X\AUGUNSHIP_SKN.w3x` 里，而索引器只解析 `.xml` / `.manifestxml`。
+
+### 关键事实（实测）
+
+1. **`.w3x` 是文本 XML**：文件头即 `<?xml ...?>` + `<AssetDeclaration>`，内容为
+   `<W3DContainer id="AUGUNSHIP_SKN" Hierarchy="AUGUNSHIP_SKL">` + `<SubObject>` 子树。
+   附带 UTF-8 BOM（抽样 292 个 Corona w3x：0 个 UTF-16，40 个带 BOM）。
+2. **w3x 通过 `<Include type="all">` 链进索引**：`Mod.xml → … → W3X.xml → W3X/*.w3x`，
+   也常用 `ART:xxx.w3x`（SDK 根、项目 `Art` 等搜索路径）。索引器此前只把 w3x 登记为
+   文件（`stream.files`），从不解析，因此其顶层资产不在 `assetsById` 中。
+3. **类型匹配本来是对的**：`Model@Name` 的 refType 是 `BaseRenderAssetType`，
+   `W3DContainer → BaseRenderAssetType` 可赋值（`isAssignableTo` = true）。缺的只是定义。
+4. **manifest / SageXml 支持早已存在**（第二轮/第三轮），但该资产是 mod 自己的 w3x，
+   不在 `builtmods/*.manifest` 也不在 SageXml——hover 的 "may exist in a compiled manifest
+   or vanilla data" 只是通用兜底文案。
+
+### 规模调查（Corona，D: 盘已连接）
+
+- **3788 个 w3x，共 2.64 GB**；最大 22.8 MB；163 个超过原 4 MB 解析上限，11 个超 10 MB。
+- 大文件结构符合"建模软件导出"模式：顶层是少量固定 W3D 资产
+  （`W3DHierarchy` + 若干 `W3DMesh` / `W3DContainer` / `W3DCollisionBox`，
+  有的还带 `<Includes>` 引用 `ART:*.xml`）；体积大头是 `W3DMesh` 内的
+  `Vertices/V`、`Normals/N`、`TexCoords/T`、`Triangles/T` 等 `maxOccurs="unbounded"`
+  数值元素。例如 21.7 MB 的 `CBRefinery_BLD.W3X` 只有 22 个顶层记录，
+  Vertices+Triangles 块占约 12 MB（55%）。
+- 全量建 DOM 的代价（实测 6.3 MB Aegis 文件）：407 ms、193,651 个元素、
+  **堆内存 +109 MB（约 17 倍文本体积）**；22 MB 文件外推约 1.5 s + ~380 MB/份。
+  浅扫描（只取顶层记录）：6.3 MB ~200 ms、22 MB ~600 ms，保留内存近似为零。
+- **读整个文件不可避免，但建树不是**：浅扫描仍然是线性扫描全文（要知道顶层元素边界
+  就必须扫完），只是不分配子节点对象——所以"事后优化"完全有意义，且是必要项。
+
+### 修复
+
+1. **新增浅扫描模块** `src/indexer/shallowScan.ts`（纯 TS）：
+   单次线性扫描，只提取顶层元素 `name + id`（含精确 offset）、顶层 `<Includes>`
+   的 `Include@type/source`、任意层级 `<xi:include>` 的 `href/xpointer`、`<Defines>`
+   常量；注释 / CDATA / DOCTYPE / PI 整体跳过；属性解析兼容引号内 `>` 与 `/`。
+2. **索引模式三分**：`.xml`/`.manifestxml` 全量解析（4 MB 上限不变）；
+   `.w3x` 一律浅扫描；未知扩展名先嗅探文件头（512 字节，BOM/空白后以 `<` 开头且无
+   NUL 字节 → 按 XML 浅扫描，否则按二进制仅登记）。w3x 自身的 `<Includes>` 与
+   嵌套 `xi:include` 会继续被 walk（BAB 语义）。
+3. **持久缓存**：`DocumentCache` / `ShallowScanCache` 移到 `src/indexer/caches.ts`，
+   由 `ModWorkspace` 持有并传入每次新建的 `ModIndexer`；读取时按 `mtimeMs + size`
+   校验，未变化不重读。这是 w3x 方案在 Corona 上可用的前提（否则每次保存都重读 2.6 GB）。
+4. **BOM 剥离**：`xmlParser` 新增 `stripBom()`，全量解析与浅扫描前统一剥离，
+   保证第一行偏移与编辑器一致。
+5. **Include source 补全候选**：DATA 目录与项目相对路径候选加入 `.w3x`
+   （`fileScanner`），`W3X/xxx.w3x`、`ART/xxx.w3x` 可补全。
+6. 索引报告/状态栏新增 `shallowScannedFiles` / `shallowCacheHits` 统计。
+
+### 验证
+
+- 单元测试 **53 → 63 全绿**：新增 `test/shallowScan.test.mjs`（顶层资产 / Includes /
+  xi:include / Defines / 引号内 `>` / CDATA / 未闭合标签 / 数值载荷不产生记录）；
+  indexer 新增 w3x 链、`.w3d` 嗅探、二进制 `.dds` 跳过、跨重建缓存命中、
+  BOM 偏移断言；xmlParser 新增 `stripBom` 用例。
+- AttachTest 实机：
+  - 首次构建 1.2 s，浅扫 62 个文件；`Model@Name=AUGunship_SKN` →
+    `W3DContainer @ …\W3X\AUGUNSHIP_SKN.w3x:3`；`Hierarchy=AUGunship_SKL`、
+    `AUGunship_FP` 同样解析；资产数 35,546 → 35,607。
+  - 第二次构建 354 ms，0 次重扫，62 次缓存命中。
+- Corona 实机（D: 盘）：
+  - 首次构建 241 s：8,976 个文件、**浅扫 4,829 个**、资产 64,868
+    （manifest 35,322）、3 个流、183 个 Define。
+  - 第二次构建 38 s：0 次重扫、4,829 次缓存命中、资产数一致。
+  - `CBREFINERY_BLD` 正确解析到 `W3DHierarchy @ cb/CBRefinery_BLD.w3x:16` 与
+    `W3DContainer @ …:776412`。
+
+### 边界与后续
+
+- 首次建索引较慢（Corona ~4 分钟，机械盘）：读 2.6 GB 是下限，浅扫描本身 ~30-90 s；
+  后续可做并行扫描或把 w3x 顶层记录做成独立小缓存文件。
+- 第二次构建仍有 ~38 s（主要是对 ~9k 文件逐文件 stat + 重建 Map，机械盘随机读）；
+  后续可做"文件清单 + stat 快照"级缓存。
+- 浅扫描对 w3x 不做 XSD 校验（编辑器特性不注册 w3x 语言）；若用户手动把 `*.w3x`
+  关联为 xml，完整解析仍会发生在打开的文档上（VS Code 自身行为）。
+- UTF-16 XML 的 w3x 会被嗅探判定为二进制（文件头含 NUL）；实测生态中不存在，
+  如遇可再扩展解码。

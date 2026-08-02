@@ -135,7 +135,7 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(
         `RA3 Mod XML index\n` +
           `Project: ${s.projectDir}\n` +
-          `Files: ${s.indexedFiles} (${s.parsedFiles} parsed)\n` +
+          `Files: ${s.indexedFiles} (${s.parsedFiles} parsed, ${s.shallowScannedFiles} shallow-scanned, ${s.shallowCacheHits} cached)\n` +
           `Assets: ${s.assetCount} (${s.manifestAssetCount} from ${s.manifestFiles} manifests)\n` +
           `Defines: ${s.defineCount} · Streams: ${s.streams} · Candidates: ${s.sourceCandidates}\n` +
           `Indexed in ${(s.elapsedMs / 1000).toFixed(1)}s`,

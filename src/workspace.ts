@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CachedDirectoryWalker } from "./indexer/fileScanner";
 import { ModIndexer } from "./indexer/indexer";
+import { DocumentCache, ShallowScanCache } from "./indexer/caches";
 import type { ModIndex } from "./indexer/types";
 import { readSettings, type ExtensionSettings } from "./settings";
 
@@ -15,6 +16,11 @@ export class ModWorkspace {
   settings: ExtensionSettings;
 
   private walker = new CachedDirectoryWalker();
+  // Caches owned here survive rebuilds: a fresh ModIndexer reuses them and
+  // only re-reads files whose stat changed (crucial for the ~2.6 GB of .w3x
+  // art assets in a project like Corona).
+  private documentCache = new DocumentCache();
+  private shallowCache = new ShallowScanCache();
   private statusBar: vscode.StatusBarItem;
   private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private building = false;
@@ -81,6 +87,8 @@ export class ModWorkspace {
         indexSageXml: this.settings.indexSageXml,
         additionalDataSearchPaths: this.settings.additionalDataSearchPaths,
         walker: this.walker,
+        documentCache: this.documentCache,
+        shallowCache: this.shallowCache,
       });
       const started = Date.now();
       this.index = await indexer.build();
@@ -90,7 +98,7 @@ export class ModWorkspace {
       this.statusBar.text = `$(symbol-misc) RA3 XML: ${formatCount(s.assetCount)} assets`;
       this.statusBar.tooltip =
         `${s.projectDir}\n` +
-        `${s.indexedFiles} files indexed (${secs}s)\n` +
+        `${s.indexedFiles} files indexed (${s.parsedFiles} parsed, ${s.shallowScannedFiles} art assets shallow-scanned, ${secs}s)\n` +
         `${s.assetCount} assets (${s.manifestAssetCount} from ${s.manifestFiles} manifests)\n` +
         `${s.defineCount} defines, ${s.streams} streams, ${s.sourceCandidates} include candidates`;
     } catch (err) {
@@ -113,6 +121,7 @@ export class ModWorkspace {
     return {
       file: { path, stat: null },
       parse,
+      shallow: null,
       lineMap: new LineMap(text),
     };
   }
