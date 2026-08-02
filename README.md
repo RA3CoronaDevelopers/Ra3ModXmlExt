@@ -23,6 +23,9 @@
   `Model@Name`、`Hierarchy`、`Mesh` 等引用可以解析、悬停与跳转。超大模型
   （几十 MB 的顶点/三角形数据）采用浅扫描——只提取顶层资产记录、不建 DOM 树，
   结果在 workspace 级缓存并跨重建复用，保存文件触发的重建不会重读未变化的模型文件。
+- **大项目性能**：索引记录（资产 / Define / Include / 行号）与 include 解析结果
+  跨重建缓存，保存触发的重建零 stat、零重读（Corona 实测约 2 秒）；DOM 树只按需
+  保留并设元素预算，避免内存膨胀。
 
 ## 使用
 
@@ -78,8 +81,10 @@ src/
     fileScanner.ts        目录扫描与 Include source 候选
     refs.ts               引用目标解析（按引用类型过滤）
     shallowScan.ts        .w3x 等大体积美术资产顶层浅扫描（纯 TS，不建 DOM）
-    caches.ts             跨重建持久缓存（DocumentCache / ShallowScanCache）
-    indexer.ts            工作区索引器（后台、缓存、增量重建）
+    records.ts            每文件紧凑索引记录（资产/Define/Include/xi + 行号）
+    caches.ts             跨重建持久缓存（DocumentCache / IndexRecordsCache /
+                          IncludeResolveCache）
+    indexer.ts            工作区索引器（后台、缓存、记录驱动重建）
   features/               completion / hover / navigation / diagnostics / semanticTokens
 syntaxes/                 TextMate 注入语法
 tools/                    XSD → 模型、AssetType 枚举提取

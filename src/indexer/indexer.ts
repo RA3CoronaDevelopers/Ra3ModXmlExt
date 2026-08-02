@@ -12,6 +12,7 @@
  */
 
 import { open, readFile, readdir, stat } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import {
   LineMap,
@@ -24,6 +25,7 @@ import {
   buildSearchPaths,
   manifestPathForReference,
   resolveSource,
+  type ResolveResult,
   type SearchPaths,
 } from "./includeResolver";
 import {
@@ -34,8 +36,14 @@ import {
 } from "./manifestParser";
 import { canonicalTypeName } from "../model/schemaModel";
 import { collectSourceCandidates } from "./fileScanner";
-import { DocumentCache, ShallowScanCache, normKey } from "./caches";
+import { DocumentCache, IncludeResolveCache, IndexRecordsCache, normKey } from "./caches";
+import type { IndexRecordsCacheEntry } from "./caches";
 import { scanXmlShallow } from "./shallowScan";
+import {
+  extractIndexRecords,
+  recordsFromShallow,
+  type IndexRecordXi,
+} from "./records";
 import type {
   AssetDef,
   DefineDef,
@@ -69,8 +77,16 @@ type XmlMode = "full" | "shallow" | "binary";
 export class ModIndexer {
   private searchPaths: SearchPaths;
   private docs: DocumentCache;
-  private shallowDocs: ShallowScanCache;
-  private scanCounters = { shallowScannedFiles: 0, shallowCacheHits: 0 };
+  private recordsCache: IndexRecordsCache;
+  private resolveCache: IncludeResolveCache;
+  private scanCounters = {
+    shallowScannedFiles: 0,
+    shallowCacheHits: 0,
+    recordsCacheHits: 0,
+    resolveCacheHits: 0,
+    resolveCalls: 0,
+  };
+  private phase = { candidatesMs: 0, walkMs: 0 };
   private assets = new Map<string, Map<string, AssetDef[]>>();
   private assetsById = new Map<string, AssetDef[]>();
   private defines = new Map<string, DefineDef[]>();
@@ -89,7 +105,8 @@ export class ModIndexer {
     });
     // Caches may be owned by the workspace so they survive rebuilds.
     this.docs = opts.documentCache ?? new DocumentCache();
-    this.shallowDocs = opts.shallowCache ?? new ShallowScanCache();
+    this.recordsCache = opts.recordsCache ?? new IndexRecordsCache();
+    this.resolveCache = opts.resolveCache ?? new IncludeResolveCache();
   }
 
   /**
@@ -105,22 +122,30 @@ export class ModIndexer {
    */
   async readDocument(path: string): Promise<ParsedFile | null> {
     const key = normKey(path);
-    const mode = await this.detectXmlMode(path);
-    if (mode === "shallow") return this.scanShallow(path);
-    if (mode === "binary") {
-      try {
-        const st = await stat(path);
-        const file: IndexedFile = { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } };
-        this.files.set(key, file);
-        return { file, parse: null, shallow: null, lineMap: null };
-      } catch {
-        const file: IndexedFile = { path: resolve(path), stat: null };
-        this.files.set(key, file);
-        return { file, parse: null, shallow: null, lineMap: null };
+    const trust =
+      this.opts.trustUnchanged === true && !this.opts.changedFiles?.has(key);
+
+    // Trusted fast path: a file that the watcher has not reported as changed
+    // is reused without any stat / content sniff / read at all. This is what
+    // makes save-triggered rebuilds cheap on huge corpora (Corona: ~9k files,
+    // ~2.6 GB of art assets on a mechanical drive).
+    if (trust) {
+      const rec = this.recordsCache.get(key);
+      if (rec) return this.recordsParsed(path, rec);
+      const cached = this.docs.get(key);
+      if (cached) {
+        this.files.set(key, cached.file);
+        return cached;
       }
     }
+
+    // Untrusted / cache miss: verify the stat against caches, then read.
     try {
       const st = await stat(path);
+      const rec = this.recordsCache.get(key);
+      if (rec?.stat && rec.stat.mtimeMs === st.mtimeMs && rec.stat.size === st.size) {
+        return this.recordsParsed(path, rec);
+      }
       const hit = this.docs.get(key);
       if (
         hit?.file.stat &&
@@ -130,29 +155,41 @@ export class ModIndexer {
         this.files.set(key, hit.file);
         return hit;
       }
+      const mode = await this.detectXmlMode(path);
+      if (mode === "shallow") return this.scanShallow(path, st);
+      if (mode === "binary") {
+        const file: IndexedFile = { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } };
+        const parsed: ParsedFile = { file, parse: null, records: null, lineMap: null };
+        this.docs.set(parsed);
+        this.files.set(key, file);
+        return parsed;
+      }
       if (st.size > MAX_PARSE_BYTES) {
         const file: IndexedFile = { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } };
-        const parsed: ParsedFile = { file, parse: null, shallow: null, lineMap: null };
+        const parsed: ParsedFile = { file, parse: null, records: null, lineMap: null };
         this.docs.set(parsed);
         this.files.set(key, file);
         return parsed;
       }
       const text = stripBom(await readFile(path, "utf8"));
+      const lineMap = new LineMap(text);
       const parse = parseXml(text);
+      const records = extractIndexRecords(parse, lineMap);
       const parsed: ParsedFile = {
         file: { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } },
         parse,
-        shallow: null,
-        lineMap: new LineMap(text),
+        records,
+        lineMap,
       };
       this.docs.set(parsed);
+      this.recordsCache.set(key, { stat: parsed.file.stat, records, kind: "full" });
       this.files.set(key, parsed.file);
       return parsed;
     } catch {
       const parsed: ParsedFile = {
         file: { path: resolve(path), stat: null },
         parse: null,
-        shallow: null,
+        records: null,
         lineMap: null,
       };
       this.docs.set(parsed);
@@ -163,34 +200,78 @@ export class ModIndexer {
 
   /**
    * Shallow-scans a large art-asset XML document (no DOM built) and caches
-   * the top-level records. Cache hits are counted separately so tests and
-   * the index report can verify that rebuilds skip unchanged files.
+   * its compact index records. The transient LineMap used to compute record
+   * lines is discarded, so the cache never retains megabytes of line offsets
+   * for model files (Corona w3x alone would otherwise keep ~700 MB).
    */
-  private async scanShallow(path: string): Promise<ParsedFile | null> {
+  private async scanShallow(path: string, st: Stats): Promise<ParsedFile | null> {
     const key = normKey(path);
     try {
-      const st = await stat(path);
-      const hit = this.shallowDocs.get(key);
-      if (
-        hit?.file.stat &&
-        hit.file.stat.mtimeMs === st.mtimeMs &&
-        hit.file.stat.size === st.size
-      ) {
-        this.scanCounters.shallowCacheHits++;
-        this.files.set(key, hit.file);
-        return hit;
-      }
       const text = stripBom(await readFile(path, "utf8"));
-      const shallow = scanXmlShallow(text);
+      const lineMap = new LineMap(text);
+      const records = recordsFromShallow(scanXmlShallow(text), lineMap);
       const parsed: ParsedFile = {
         file: { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } },
         parse: null,
-        shallow,
-        lineMap: new LineMap(text),
+        records,
+        lineMap: null,
       };
-      this.shallowDocs.set(parsed);
+      this.recordsCache.set(key, { stat: parsed.file.stat, records, kind: "shallow" });
       this.files.set(key, parsed.file);
       this.scanCounters.shallowScannedFiles++;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Builds a lean ParsedFile from cached index records (no DOM / line map). */
+  private recordsParsed(path: string, entry: IndexRecordsCacheEntry): ParsedFile {
+    if (entry.kind === "shallow") this.scanCounters.shallowCacheHits++;
+    else this.scanCounters.recordsCacheHits++;
+    const file: IndexedFile = { path: resolve(path), stat: entry.stat };
+    this.files.set(normKey(path), file);
+    return { file, parse: null, records: entry.records, lineMap: null };
+  }
+
+  /**
+   * Reads a document and guarantees a DOM parse tree. Used only for
+   * root-level <xi:include> xpointer selection (rare), where the target's
+   * container children are needed.
+   */
+  private async readDom(path: string): Promise<ParsedFile | null> {
+    const key = normKey(path);
+    const cached = this.docs.get(key);
+    if (cached?.parse?.root) {
+      this.files.set(key, cached.file);
+      return cached;
+    }
+    try {
+      const st = await stat(path);
+      const hit = this.docs.get(key);
+      if (
+        hit?.parse?.root &&
+        hit.file.stat &&
+        hit.file.stat.mtimeMs === st.mtimeMs &&
+        hit.file.stat.size === st.size
+      ) {
+        this.files.set(key, hit.file);
+        return hit;
+      }
+      if (st.size > MAX_PARSE_BYTES) return null;
+      const text = stripBom(await readFile(path, "utf8"));
+      const lineMap = new LineMap(text);
+      const parse = parseXml(text);
+      const records = extractIndexRecords(parse, lineMap);
+      const parsed: ParsedFile = {
+        file: { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } },
+        parse,
+        records,
+        lineMap,
+      };
+      this.docs.set(parsed);
+      this.recordsCache.set(key, { stat: parsed.file.stat, records, kind: "full" });
+      this.files.set(key, parsed.file);
       return parsed;
     } catch {
       return null;
@@ -203,6 +284,38 @@ export class ModIndexer {
     if (FULL_XML_EXTENSIONS.has(ext)) return "full";
     if (SHALLOW_XML_EXTENSIONS.has(ext)) return "shallow";
     return (await looksLikeXml(path)) ? "shallow" : "binary";
+  }
+
+  /**
+   * Resolves an include source through the cross-rebuild cache. Existence
+   * does not change on content edits, so trusted rebuilds pay zero statSync
+   * for include resolution (Corona does ~110k checks per build otherwise).
+   */
+  private resolveCached(source: string, currentDir: string | null): ResolveResult {
+    const key = `${normKey(currentDir ?? "")}\u0000${source}`;
+    const hit = this.resolveCache.get(key);
+    if (hit) {
+      this.scanCounters.resolveCacheHits++;
+      return hit;
+    }
+    this.scanCounters.resolveCalls++;
+    const result = resolveSource(source, currentDir, this.searchPaths);
+    this.resolveCache.set(key, result);
+    return result;
+  }
+
+  /** Cached manifest lookup for `reference` includes. */
+  private manifestPathCached(source: string): string | null {
+    const key = source.toLowerCase();
+    const hit = this.resolveCache.getManifest(key);
+    if (hit !== undefined) {
+      this.scanCounters.resolveCacheHits++;
+      return hit;
+    }
+    this.scanCounters.resolveCalls++;
+    const path = manifestPathForReference(source, this.opts.builtmodsDirs);
+    this.resolveCache.setManifest(key, path);
+    return path;
   }
 
   /** Returns the cached parse if present (does not read from disk). */
@@ -218,6 +331,7 @@ export class ModIndexer {
       : null;
 
     // ── Streams ──
+    const walkStart = Date.now();
     const staticEntry = projectData ? join(projectData, "Mod.xml") : null;
     if (staticEntry) {
       const stream: StreamInfo = { name: "static", entry: staticEntry, files: new Set() };
@@ -246,8 +360,10 @@ export class ModIndexer {
         await this.walk(entry, "all", stream, 0);
       }
     }
+    this.phase.walkMs = Date.now() - walkStart;
 
     // ── Source completion candidates ──
+    const candidatesStart = Date.now();
     const dataDirs = [
       projectData ?? join(this.opts.projectDir, "Data"),
       join(this.opts.sdkDir, "SageXml"),
@@ -292,6 +408,7 @@ export class ModIndexer {
       ...sdkRootCandidates,
       ...this.sourceCandidates,
     ]);
+    this.phase.candidatesMs = Date.now() - candidatesStart;
 
     const manifestAssetCount = [...this.manifests.values()].reduce(
       (sum, m) => sum + m.assets.length,
@@ -318,6 +435,11 @@ export class ModIndexer {
         ).length,
         shallowScannedFiles: this.scanCounters.shallowScannedFiles,
         shallowCacheHits: this.scanCounters.shallowCacheHits,
+        recordsCacheHits: this.scanCounters.recordsCacheHits,
+        resolveCacheHits: this.scanCounters.resolveCacheHits,
+        resolveCalls: this.scanCounters.resolveCalls,
+        candidatesMs: this.phase.candidatesMs,
+        walkMs: this.phase.walkMs,
         assetCount: [...this.assets.values()].reduce((sum, byId) => sum + byId.size, 0),
         defineCount: this.defines.size,
         manifestFiles: this.manifests.size,
@@ -359,167 +481,64 @@ export class ModIndexer {
 
     stream.files.add(key);
 
-    // readDocument handles every mode: full XML parse, shallow scan for
-    // art-asset XML (.w3x / content-sniffed), or binary registration only.
+    // readDocument returns compact index records for every indexable XML
+    // document (full parse or shallow scan), or a bare file registration
+    // for binary / unparseable targets.
     const parsed = await this.readDocument(path);
     if (!parsed) return;
-    if (parsed.shallow) {
-      await this.walkShallow(parsed, stream, depth, mode === "instance");
+    if (parsed.records) {
+      await this.applyRecords(parsed, stream, depth, mode === "instance");
       return;
-    }
-    if (!parsed.parse?.root) return;
-    const root = parsed.parse.root;
-
-    for (const child of root.children) {
-      const local = localName(child.name);
-      if (local === "Tags" || local === "Includes" || local === "Defines") continue;
-      if (local === "include") {
-        await this.handleXiInclude(child, parsed, stream, depth);
-        continue;
-      }
-      const idAttr = child.attrs.find((a) => a.name === "id");
-      if (idAttr) {
-        this.addAsset({
-          type: local,
-          id: idAttr.value,
-          file: parsed.file.path,
-          line: lineOf(parsed, idAttr.valueStart),
-          origin: this.originOf(parsed.file.path),
-          stream: stream.name,
-          viaInstance: mode === "instance",
-        });
-      }
-    }
-
-    for (const child of root.children) {
-      if (localName(child.name) !== "Defines") continue;
-      for (const define of child.children) {
-        if (localName(define.name) !== "Define") continue;
-        const name = define.attrs.find((a) => a.name === "name")?.value;
-        const value = define.attrs.find((a) => a.name === "value")?.value;
-        if (!name) continue;
-        const entry: DefineDef = {
-          name,
-          value: value ?? "",
-          file: parsed.file.path,
-          line: lineOf(parsed, define.start),
-          origin: this.originOf(parsed.file.path),
-        };
-        const arr = this.defines.get(name.toLowerCase());
-        if (arr) arr.push(entry);
-        else this.defines.set(name.toLowerCase(), [entry]);
-      }
-    }
-
-    const includesElem = root.children.find((c) => localName(c.name) === "Includes");
-    if (includesElem) {
-      for (const inc of includesElem.children) {
-        if (localName(inc.name) !== "Include") continue;
-        const type = inc.attrs.find((a) => a.name === "type")?.value;
-        const source = inc.attrs.find((a) => a.name === "source")?.value;
-        if (!source) continue;
-        const resolved = resolveSource(source, dirname(parsed.file.path), this.searchPaths);
-        if (!resolved.path) {
-          this.diagnostics.push({
-            file: parsed.file.path,
-            line: lineOf(parsed, inc.start),
-            message: `Include target not found: ${source}`,
-            severity: "warning",
-            code: "include-not-found",
-          });
-          continue;
-        }
-        if (type === "all" || type === "instance") {
-          await this.walk(resolved.path, type === "all" ? "all" : "instance", stream, depth + 1);
-        } else if (type === "reference") {
-          const manifestPath = manifestPathForReference(source, this.opts.builtmodsDirs);
-          if (manifestPath) {
-            const loaded = await this.loadManifest(manifestPath, stream.name);
-            if (!loaded) {
-              // The manifest could not be parsed (missing/invalid): fall back
-              // to the placeholder target so its content is still available.
-              await this.walk(resolved.path, "instance", stream, depth + 1);
-            }
-          } else {
-            // reference to a real XML file: treat its assets as available
-            await this.walk(resolved.path, "instance", stream, depth + 1);
-          }
-        }
-      }
-    }
-
-    // Nested <xi:include> anywhere in the tree (not just under the root):
-    // the target content is inlined into the parent element. We make the
-    // target file available and surface missing targets instead of ignoring
-    // them silently.
-    for (const el of parsed.parse.elements) {
-      if (localName(el.name) !== "include") continue;
-      if (el.parent === root) continue; // already handled in the loop above
-      const href = el.attrs.find((a) => a.name === "href")?.value;
-      if (!href) continue;
-      const resolved = resolveSource(href, dirname(parsed.file.path), this.searchPaths);
-      if (!resolved.path) {
-        this.diagnostics.push({
-          file: parsed.file.path,
-          line: lineOf(parsed, el.start),
-          message: `xi:include target not found: ${href}`,
-          severity: "warning",
-          code: "include-not-found",
-        });
-        continue;
-      }
-      stream.files.add(normKey(resolved.path));
-      if ((await this.detectXmlMode(resolved.path)) !== "binary") {
-        await this.walk(resolved.path, "all", stream, depth + 1);
-      }
     }
   }
 
   /**
-   * Consumes a shallow-scanned art-asset document: top-level assets,
-   * top-level <Includes>, <Defines> and nested <xi:include> targets.
+   * Applies a document's compact index records: top-level assets, defines,
+   * <Includes>, nested <xi:include> and root-level <xi:include> targets.
+   * Works identically for fully parsed XML and shallow-scanned art assets.
    */
-  private async walkShallow(
+  private async applyRecords(
     parsed: ParsedFile,
     stream: StreamInfo,
     depth: number,
     viaInstance: boolean,
   ): Promise<void> {
-    const scan = parsed.shallow;
-    if (!scan) return;
+    const records = parsed.records;
+    if (!records) return;
     const file = parsed.file.path;
+    const origin = this.originOf(file);
 
-    for (const asset of scan.assets) {
+    for (const asset of records.assets) {
       this.addAsset({
-        type: asset.name,
+        type: asset.type,
         id: asset.id,
         file,
-        line: lineOf(parsed, asset.idValueStart),
-        origin: this.originOf(file),
+        line: asset.line,
+        origin,
         stream: stream.name,
         viaInstance,
       });
     }
 
-    for (const define of scan.defines) {
+    for (const define of records.defines) {
       const entry: DefineDef = {
         name: define.name,
         value: define.value,
         file,
-        line: lineOf(parsed, define.start),
-        origin: this.originOf(file),
+        line: define.line,
+        origin,
       };
       const arr = this.defines.get(define.name.toLowerCase());
       if (arr) arr.push(entry);
       else this.defines.set(define.name.toLowerCase(), [entry]);
     }
 
-    for (const inc of scan.includes) {
-      const resolved = resolveSource(inc.source, dirname(file), this.searchPaths);
+    for (const inc of records.includes) {
+      const resolved = this.resolveCached(inc.source, dirname(file));
       if (!resolved.path) {
         this.diagnostics.push({
           file,
-          line: lineOf(parsed, inc.start),
+          line: inc.line,
           message: `Include target not found: ${inc.source}`,
           severity: "warning",
           code: "include-not-found",
@@ -534,7 +553,7 @@ export class ModIndexer {
           depth + 1,
         );
       } else if (inc.type === "reference") {
-        const manifestPath = manifestPathForReference(inc.source, this.opts.builtmodsDirs);
+        const manifestPath = this.manifestPathCached(inc.source);
         if (manifestPath) {
           const loaded = await this.loadManifest(manifestPath, stream.name);
           if (!loaded) await this.walk(resolved.path, "instance", stream, depth + 1);
@@ -544,12 +563,12 @@ export class ModIndexer {
       }
     }
 
-    for (const xi of scan.xiIncludes) {
-      const resolved = resolveSource(xi.href, dirname(file), this.searchPaths);
+    for (const xi of records.nestedXiIncludes) {
+      const resolved = this.resolveCached(xi.href, dirname(file));
       if (!resolved.path) {
         this.diagnostics.push({
           file,
-          line: lineOf(parsed, xi.start),
+          line: xi.line,
           message: `xi:include target not found: ${xi.href}`,
           severity: "warning",
           code: "include-not-found",
@@ -557,68 +576,65 @@ export class ModIndexer {
         continue;
       }
       stream.files.add(normKey(resolved.path));
-      if ((await this.detectXmlMode(resolved.path)) !== "binary") {
-        await this.walk(resolved.path, "all", stream, depth + 1);
-      }
+      await this.walk(resolved.path, "all", stream, depth + 1);
+    }
+
+    for (const xi of records.rootXiIncludes) {
+      await this.handleRootXiInclude(xi, file, stream, depth);
     }
   }
 
-  private async handleXiInclude(
-    xi: XmlElement,
-    parent: ParsedFile,
+  /**
+   * Root-level <xi:include> with an xpointer selects a named container's
+   * children in the target document, so the target's DOM is needed. These
+   * targets are rare, so they are parsed on demand (the tree is also cached).
+   */
+  private async handleRootXiInclude(
+    xi: IndexRecordXi,
+    parentFile: string,
     stream: StreamInfo,
     depth: number,
   ): Promise<void> {
-    const href = xi.attrs.find((a) => a.name === "href")?.value;
-    if (!href) return;
-    const resolved = resolveSource(href, dirname(parent.file.path), this.searchPaths);
+    const resolved = this.resolveCached(xi.href, dirname(parentFile));
     if (!resolved.path) {
       this.diagnostics.push({
-        file: parent.file.path,
-        line: lineOf(parent, xi.start),
-        message: `xi:include target not found: ${href}`,
+        file: parentFile,
+        line: xi.line,
+        message: `xi:include target not found: ${xi.href}`,
         severity: "warning",
         code: "include-not-found",
       });
       return;
     }
-    if ((await this.detectXmlMode(resolved.path)) === "binary") return;
-    const target = await this.readDocument(resolved.path);
-    if (!target) return;
-    if (target.shallow) {
-      // Shallow-scanned targets have no tree to select xpointer children
-      // from; index their top-level content as a whole.
-      stream.files.add(normKey(target.file.path));
-      await this.walk(target.file.path, "all", stream, depth + 1);
-      return;
-    }
-    if (!target.parse?.root) return;
 
-    const xpointer = xi.attrs.find((a) => a.name === "xpointer")?.value ?? "";
-    let candidates: XmlElement[];
-    if (xpointer) {
-      const container = findXPointerContainer(target.parse, xpointer);
-      candidates = container ? container.children : [];
-    } else {
-      candidates = target.parse.root.children;
-    }
-    for (const el of candidates) {
-      const local = localName(el.name);
-      if (local === "Tags" || local === "Includes" || local === "Defines") continue;
-      const idAttr = el.attrs.find((a) => a.name === "id");
-      if (idAttr) {
-        this.addAsset({
-          type: local,
-          id: idAttr.value,
-          file: target.file.path,
-          line: lineOf(target, idAttr.valueStart),
-          origin: this.originOf(target.file.path),
-          stream: stream.name,
-        });
+    const target = await this.readDom(resolved.path);
+    if (target?.parse?.root) {
+      const xpointer = xi.xpointer ?? "";
+      let candidates: XmlElement[];
+      if (xpointer) {
+        const container = findXPointerContainer(target.parse, xpointer);
+        candidates = container ? container.children : [];
+      } else {
+        candidates = target.parse.root.children;
+      }
+      for (const el of candidates) {
+        const local = localName(el.name);
+        if (local === "Tags" || local === "Includes" || local === "Defines") continue;
+        const idAttr = el.attrs.find((a) => a.name === "id");
+        if (idAttr) {
+          this.addAsset({
+            type: local,
+            id: idAttr.value,
+            file: target.file.path,
+            line: lineOf(target, idAttr.valueStart),
+            origin: this.originOf(target.file.path),
+            stream: stream.name,
+          });
+        }
       }
     }
-    stream.files.add(normKey(target.file.path));
-    await this.walk(target.file.path, "all", stream, depth + 1);
+    stream.files.add(normKey(resolved.path));
+    await this.walk(resolved.path, "all", stream, depth + 1);
   }
 
   // ── Manifest loading ──────────────────────────────────────────────

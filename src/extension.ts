@@ -109,18 +109,24 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument((doc) => {
       if (doc.languageId !== "xml") return;
+      ws.invalidate(doc.uri.fsPath);
       ws.scheduleRebuild();
       void diagnostics.update(doc);
     }),
   );
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("ra3modxml")) ws.scheduleRebuild();
+      if (e.affectsConfiguration("ra3modxml")) {
+        // Search paths / builtmods locations may have changed: cached include
+        // resolutions and manifest lookups are no longer valid.
+        ws.invalidateExistence();
+        ws.scheduleRebuild();
+      }
     }),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("ra3modxml.reindex", () => ws.rebuild()),
+    vscode.commands.registerCommand("ra3modxml.reindex", () => ws.rebuild(true)),
   );
   context.subscriptions.push(
     vscode.commands.registerCommand("ra3modxml.openIndexReport", () => {
@@ -135,7 +141,7 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(
         `RA3 Mod XML index\n` +
           `Project: ${s.projectDir}\n` +
-          `Files: ${s.indexedFiles} (${s.parsedFiles} parsed, ${s.shallowScannedFiles} shallow-scanned, ${s.shallowCacheHits} cached)\n` +
+          `Files: ${s.indexedFiles} (${s.parsedFiles} parsed, ${s.shallowScannedFiles} shallow-scanned, ${s.shallowCacheHits + s.recordsCacheHits} cache hits)\n` +
           `Assets: ${s.assetCount} (${s.manifestAssetCount} from ${s.manifestFiles} manifests)\n` +
           `Defines: ${s.defineCount} · Streams: ${s.streams} · Candidates: ${s.sourceCandidates}\n` +
           `Indexed in ${(s.elapsedMs / 1000).toFixed(1)}s`,

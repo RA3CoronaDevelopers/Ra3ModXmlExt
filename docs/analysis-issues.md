@@ -685,3 +685,80 @@ AttachTest `Harbinger Gunship\GameObject.xml` 中 `<Model Name="AUGunship_SKN"/>
   关联为 xml，完整解析仍会发生在打开的文档上（VS Code 自身行为）。
 - UTF-16 XML 的 w3x 会被嗅探判定为二进制（文件头含 NUL）；实测生态中不存在，
   如遇可再扩展解码。
+
+---
+
+## 十四、问题分析（第九轮，2026-08-02）：Corona 重建性能与内存
+
+### 目标与基线
+
+第八轮后 Corona 的实测基线：
+
+| 场景 | 耗时 |
+|---|---|
+| 首次全量建索引 | ~180-290s（机械盘波动） |
+| 信任二次构建（保存触发） | 8-21s |
+| 强制 reindex | 26-38s |
+| 首建后保留堆 | ~2.5GB（原因不明） |
+
+### 调查 1：二次构建为何仍有 8-21s
+
+插桩 `fs.statSync` 后发现：**每次构建（含信任重建）都会执行约 11 万次同步 statSync**，
+全部来自 `resolveSource` 的 include 目标存在性检查（BAB 搜索路径逐 base `statSync`）。
+机械盘上这就是 10-20s 的来源——即使文件内容全部命中缓存，include 解析仍在逐路径 stat。
+
+修复：新增 `IncludeResolveCache`（workspace 级、跨重建复用）：
+- 键 = 当前文件目录 + source 字符串；命中直接返回，不 stat；
+- 内容编辑不影响"文件是否存在"，因此保存触发的重建**不清除**解析缓存；
+- 文件创建/删除（watcher `onDidCreate` / `onDidDelete`）与 `ra3modxml.reindex`
+  （强制校验）清除缓存；
+- `reference` 的 manifest 查找（`builtmods/*.manifest` 存在性）同样缓存；
+- 配置变更（搜索路径 / builtmods 目录）时清除。
+
+### 调查 2：首建后保留堆 2.5GB 是什么
+
+逐级清空测量（构建 → 清 DOM 缓存 → 清 records → 清 walker → 清索引 Map）：
+
+- `DocumentCache`（元素预算 1M、64 条）：实际只保留 64 条 / 1788 个元素 ≈ 1MB；
+- `IndexRecordsCache`（8976 个文件的紧凑记录）：约 11MB；
+- 目录 walker：约 4MB；
+- 全部索引 Map（manifests + assets + assetsById + defines + files + streams +
+  candidates + diagnostics）：约 75MB；
+- 全部清空并强制 GC 后，堆回到基线（0MB 保留）。
+
+结论：2.5GB 是**构建期可回收垃圾**（60MB XML 的 DOM 瞬态 + 2.6GB w3x 扫描文本/行映射
+的分配压力），不是常驻泄漏；VSCode 正常 GC 压力下会回收。扩展常驻内存约为
+基线 + ~100MB。顺带修复了一个潜在常驻风险：w3x 的 `LineMap`（Corona 全量约 700MB）
+不再随 `ShallowScanCache` 保留，浅扫描结果以"带行号的紧凑记录"形式缓存。
+
+### 其他改动
+
+1. **`IndexRecordsCache` 取代 DOM 依赖的重建**：新增 `src/indexer/records.ts`，
+   每个文件解析时提取紧凑索引记录（顶层资产 / Define / Include / xi:include +
+   1-based 行号），跨重建缓存；信任重建完全不接触 DOM。
+2. **`DocumentCache` 双重淘汰**：条数（LRU）+ 元素预算（超预算先淘汰最大树），
+   把 DOM 常驻内存封顶；DOM 只服务于按需特性（跳转精确范围等）。
+3. **候选目录扫描并行化**（`collectSourceCandidates` 各目录 `Promise.all`）。
+4. **阶段计时**：`stats.candidatesMs` / `stats.walkMs` / `stats.resolveCalls` /
+   `stats.resolveCacheHits` 进入索引报告，便于后续定位耗时。
+5. 版本 0.1.0 → **0.1.1**。
+
+### 实测（Corona，D: 机械盘）
+
+| 场景 | 优化前 | 优化后 |
+|---|---|---|
+| 首次全量建索引 | ~180-290s | ~250s（含 2.6GB w3x 读取+浅扫描、~7.6 万次冷 statSync） |
+| 信任二次构建 | 8-21s | **2.0s**（statSync 0 次，resolveHits 15,333） |
+| 强制 reindex | 26-38s | ~5s（保留解析缓存时）；显式命令会清解析缓存，约 15-25s |
+| 首建后保留堆 | ~2.5GB（疑为泄漏） | 确认是可回收垃圾；常驻 ~100MB |
+
+单元测试 **63 → 73 全绿**：新增 `records.test.mjs`（DOM→记录提取、浅扫描→记录）、
+`caches.test.mjs`（元素预算淘汰、LRU、records/resolve 缓存），indexer 测试补充
+resolve 缓存命中与"信任重建 0 次重解析"断言。
+
+### 遗留
+
+- 首次全量建索引仍受限于机械盘读 2.6GB + 冷 statSync（~4 分钟）；后续可考虑
+  并行浅扫描（worker）或把 w3x 顶层记录持久化到磁盘缓存。
+- `ra3modxml.reindex` 出于正确性会清空解析缓存（可能 ~15-25s）；如接受 watcher
+  可靠性可改为保留。

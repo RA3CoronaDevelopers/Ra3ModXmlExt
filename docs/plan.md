@@ -86,7 +86,9 @@ src/
     fileScanner.ts     目录遍历缓存 + Include source 候选收集
     refs.ts            引用目标解析（按 refType / isRef / inheritFrom 过滤，纯 TS）
     shallowScan.ts     大体积美术资产（.w3x 等）顶层浅扫描（纯 TS，不建 DOM）
-    caches.ts          跨重建持久缓存（DocumentCache / ShallowScanCache）
+    records.ts         每文件紧凑索引记录（资产/Define/Include/xi + 行号）
+    caches.ts          跨重建持久缓存（DocumentCache / IndexRecordsCache /
+                       IncludeResolveCache）
     indexer.ts         工作区索引器（资产/Define/流/manifest/w3x 合并）
     types.ts           共享类型
   features/
@@ -149,6 +151,19 @@ test/
       w3x 重扫数为 0（4,829 次缓存命中）。
     - 读取整个文件不可避免（顶层边界需要全量扫描），但建 DOM 不是；优化的是
       "不分配子节点对象"与"跨重建不重读"，两者叠加后方案可行。
+15. **重建零 stat + 记录驱动索引**（第九轮，2026-08-02，v0.1.1）：
+    - 插桩发现每次重建（含信任重建）都有约 11 万次同步 `statSync`
+      （`resolveSource` 的 include 存在性检查），机械盘上占 10-20s；
+      `IncludeResolveCache` 按（目录 + source）缓存解析结果，内容编辑不清、
+      创建/删除文件与强制 reindex 才清。信任重建 statSync 降到 0。
+    - `IndexRecordsCache` 缓存每文件紧凑索引记录（顶层资产 / Define / Include /
+      xi:include + 1-based 行号），信任重建完全不接触 DOM；`DocumentCache`
+      双重淘汰（条数 LRU + 元素预算，超预算先淘汰最大树）把 DOM 常驻内存封顶。
+    - w3x 缓存不再保留 LineMap（Corona 全量约 700MB），浅扫描直接产出带行号的记录。
+    - 实测：Corona 信任二次构建 21s → **2.0s**（statSync 0）；首建后 2.5GB
+      堆保留确认为构建期可回收垃圾，常驻 ~100MB；强制 reindex ~5-25s。
+    - 候选目录扫描并行化；`stats` 新增 `candidatesMs` / `walkMs` / `resolveCalls` /
+      `resolveCacheHits` 供索引报告定位耗时。
 
 ## 三、实施步骤
 
@@ -157,13 +172,16 @@ test/
 3. [x] 生成模型：`schema-model.json`（XSD，295 顶层元素 / 1851 类型）与 `asset-types.json`（79 个 AssetType 哈希）。
 4. [x] 纯 TS 核心：include 解析、manifest 解析、XML 解析封装、索引器、引用解析。
 5. [x] 功能层：补全、hover、导航、诊断、大纲、高亮 grammar。
-6. [x] 单测（fixture Mod，63 个用例全绿：含 xs:list 枚举、未闭合引号恢复、list 多值
+6. [x] 单测（fixture Mod，73 个用例全绿：含 xs:list 枚举、未闭合引号恢复、list 多值
    分段、带 vscode stub 的补全集成、语义 token 兜底）+ 编译 + `vsce package` 打包
-   （ra3-mod-xml-0.1.0.vsix，约 495KB）。
+   （ra3-mod-xml-0.1.1.vsix，约 499KB）。
 7. [x] 在 AttachTest / GenEvoTest / Corona 上做冒烟验证，并按真实项目反馈修复问题（详见 `docs/analysis-issues.md` 八轮分析）。
 8. [x] w3x 美术资产索引（第八轮）：新增 `shallowScan.ts` / `caches.ts`，w3x 与内容嗅探
    XML 走浅扫描，Include source 补全候选加入 w3x，BOM 剥离，缓存跨重建持久化；
    AttachTest 报错场景（`AUGunship_SKN`）修复，Corona 首次/二次构建实测验证。
+9. [x] Corona 性能与内存优化（第九轮，v0.1.1）：`records.ts` 记录驱动索引、
+   `IncludeResolveCache` 零 stat 重建、DOM 元素预算淘汰、w3x LineMap 移除、
+   候选并行扫描、阶段计时；Corona 信任重建 2.0s；确认首建 2.5GB 为可回收垃圾。
 
 ## 四、验证结果（实测）
 
@@ -171,11 +189,11 @@ test/
 |---|---|---|---|---|
 | AttachTest | 88 文件 | ~1.2s | 35,607（manifest 35,322，w3x 浅扫 62） | 2 个流（static + mapmetadata）；二次构建 354ms / 62 缓存命中 |
 | GenEvoTest | 66 文件 | 首次 ~2.6s / 二次 ~0.4s | 35,502（manifest 35,322，w3x 浅扫 38） | 2 个流、73 个 Define；二次构建 0 重扫 / 38 缓存命中 |
-| Corona | 8,976 文件 | 首次 ~241s / 二次 ~38s | 64,868（manifest 35,322，w3x 浅扫 4,829） | 3 个流、183 个 Define、0 诊断；二次构建 0 重扫 / 4,829 缓存命中 |
+| Corona | 8,976 文件 | 首次 ~250s / 信任二次 ~2s / 强制 ~5-25s | 64,868（manifest 35,322，w3x 浅扫 4,829） | 3 个流、183 个 Define、0 诊断；二次构建 statSync 0、resolveHits 15,333 |
 
 单元测试覆盖：XML 解析（自闭合/容错/偏移/未闭合引号行尾恢复）、补全上下文（未闭合引号仍为 attribute-value、list 多值分段）、补全集成（vscode stub 下 `LocomotorTemplate@Surfaces` 未闭合引号枚举补全、空格后第二段过滤与替换范围）、语义 token（标签/属性/值范围、合法文档返回空、malformed 返回兜底 token）、include 解析（BAB 顺序、SDK 根优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、`childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list` 枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中 manifest 的 `PlayerTemplate`）。
 
-> 注：D: 盘移动硬盘已恢复连接；Corona 已按上述新数据回归（第八轮）。
+> 注：D: 盘移动硬盘已恢复连接；Corona 已在第八 / 九轮按上述新数据回归。
 
 ## 五、假设与开放问题
 

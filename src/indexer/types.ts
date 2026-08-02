@@ -1,8 +1,8 @@
 import type { XmlDocument } from "../language/xmlParser";
 import type { ManifestInfo } from "./manifestParser";
 import type { LineMap } from "../language/xmlParser";
-import type { ShallowDocument } from "./shallowScan";
-import type { DocumentCache, ShallowScanCache } from "./caches";
+import type { IndexRecords } from "./records";
+import type { DocumentCache, IncludeResolveCache, IndexRecordsCache } from "./caches";
 
 export type AssetOrigin = "project" | "sdk" | "manifest";
 
@@ -71,6 +71,16 @@ export interface IndexStats {
   shallowScannedFiles: number;
   /** Shallow scans served from the persistent cache (unchanged files). */
   shallowCacheHits: number;
+  /** Parsed XML files served from the persistent records cache. */
+  recordsCacheHits: number;
+  /** Include/xi:include resolutions served from the resolve cache. */
+  resolveCacheHits: number;
+  /** Include/xi:include resolutions performed during this build. */
+  resolveCalls: number;
+  /** Time spent enumerating Include source candidates (ms). */
+  candidatesMs: number;
+  /** Time spent walking the include graph (ms). */
+  walkMs: number;
   assetCount: number;
   defineCount: number;
   manifestFiles: number;
@@ -110,8 +120,21 @@ export interface IndexOptions {
   walker: FileWalker;
   /** Optional parse-tree cache shared across rebuilds (owned by the workspace). */
   documentCache?: DocumentCache;
-  /** Optional shallow-scan cache shared across rebuilds (owned by the workspace). */
-  shallowCache?: ShallowScanCache;
+  /** Optional index-records cache shared across rebuilds (owned by the workspace). */
+  recordsCache?: IndexRecordsCache;
+  /** Optional include-resolution cache shared across rebuilds (owned by the workspace). */
+  resolveCache?: IncludeResolveCache;
+  /**
+   * When true, cached documents whose path is not in `changedFiles` are used
+   * without a per-file stat. The workspace enables this while a file watcher
+   * invalidates caches for changed paths; a forced reindex passes false.
+   */
+  trustUnchanged?: boolean;
+  /**
+   * Normalized paths (see `normKey`) known to have changed since the caches
+   * were populated. Only consulted when `trustUnchanged` is true.
+   */
+  changedFiles?: ReadonlySet<string>;
 }
 
 export interface FileWalker {
@@ -132,9 +155,9 @@ export interface ParsedFile {
   file: IndexedFile;
   parse: XmlDocument | null;
   /**
-   * Shallow records for large art-asset XML documents (.w3x etc.); null for
-   * fully parsed XML and for binary files.
+   * Compact index records (assets/defines/includes/xi:include with lines).
+   * Present for every indexable XML document; null for binary files.
    */
-  shallow: ShallowDocument | null;
+  records: IndexRecords | null;
   lineMap: LineMap | null;
 }

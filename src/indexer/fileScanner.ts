@@ -87,8 +87,15 @@ export async function collectSourceCandidates(
     out.push({ source, path: resolve(path), prefix, baseDir: resolve(baseDir) });
   };
 
-  for (const dir of dataDirs) {
-    const files = await walker.listFiles(dir);
+  // List directories in parallel; the walker caches each directory by its
+  // mtime, so rebuilds after the first are still cheap.
+  const [dataLists, artLists, audioLists] = await Promise.all([
+    Promise.all(dataDirs.map(async (dir) => ({ dir, files: await walker.listFiles(dir) }))),
+    Promise.all(artDirs.map(async (dir) => ({ dir, files: await walker.listFiles(dir) }))),
+    Promise.all(audioDirs.map(async (dir) => ({ dir, files: await walker.listFiles(dir) }))),
+  ]);
+
+  for (const { dir, files } of dataLists) {
     for (const f of files) {
       if (!isDataCandidate(f)) continue;
       add(f, dir, "DATA");
@@ -101,15 +108,11 @@ export async function collectSourceCandidates(
     }
   }
 
-  for (const dir of artDirs) {
-    for (const f of await walker.listFiles(dir)) {
-      add(f, dir, "ART");
-    }
+  for (const { dir, files } of artLists) {
+    for (const f of files) add(f, dir, "ART");
   }
-  for (const dir of audioDirs) {
-    for (const f of await walker.listFiles(dir)) {
-      add(f, dir, "AUDIO");
-    }
+  for (const { dir, files } of audioLists) {
+    for (const f of files) add(f, dir, "AUDIO");
   }
 
   return out;

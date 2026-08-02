@@ -6,7 +6,11 @@ import fs from "node:fs";
 import os from "node:os";
 import { ModIndexer } from "../out/indexer/indexer.js";
 import { CachedDirectoryWalker } from "../out/indexer/fileScanner.js";
-import { DocumentCache, ShallowScanCache } from "../out/indexer/caches.js";
+import {
+  DocumentCache,
+  IncludeResolveCache,
+  IndexRecordsCache,
+} from "../out/indexer/caches.js";
 import { resolveReferenceTargetsForType } from "../out/indexer/refs.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -131,7 +135,8 @@ test("w3x files appear in Include source completion candidates", async () => {
 
 test("shallow scans and full parses are cached across rebuilds", async () => {
   const documentCache = new DocumentCache();
-  const shallowCache = new ShallowScanCache();
+  const recordsCache = new IndexRecordsCache();
+  const resolveCache = new IncludeResolveCache();
   const makeIndexer = () =>
     new ModIndexer({
       projectDir: project,
@@ -141,7 +146,8 @@ test("shallow scans and full parses are cached across rebuilds", async () => {
       additionalDataSearchPaths: [],
       walker: new CachedDirectoryWalker(),
       documentCache,
-      shallowCache,
+      recordsCache,
+      resolveCache,
     });
 
   const first = await makeIndexer().build();
@@ -150,8 +156,68 @@ test("shallow scans and full parses are cached across rebuilds", async () => {
   assert.equal(first.stats.shallowScannedFiles, 2, "w3x + sniffed w3d scanned on first build");
   assert.equal(second.stats.shallowScannedFiles, 0, "unchanged art assets are not re-scanned");
   assert.equal(second.stats.shallowCacheHits, 2);
+  assert.ok(second.stats.recordsCacheHits > 0, "XML records served from cache");
+  assert.ok(second.stats.resolveCacheHits > 0, "include resolutions served from cache");
+  assert.equal(second.stats.resolveCalls, 0, "no include re-resolved on a trusted rebuild");
   assert.equal(second.stats.assetCount, first.stats.assetCount);
   assert.equal(second.stats.indexedFiles, first.stats.indexedFiles);
+});
+
+test("trusted rebuilds skip unchanged files; invalidation forces re-reads", async () => {
+  const documentCache = new DocumentCache();
+  const recordsCache = new IndexRecordsCache();
+  const resolveCache = new IncludeResolveCache();
+  const opts = () => ({
+    projectDir: project,
+    sdkDir: sdk,
+    builtmodsDirs: [join(sdk, "builtmods")],
+    indexSageXml: true,
+    additionalDataSearchPaths: [],
+    walker: new CachedDirectoryWalker(),
+    documentCache,
+    recordsCache,
+    resolveCache,
+  });
+
+  // Trusted rebuild: cached files are reused without any per-file stat/read.
+  const first = await new ModIndexer({ ...opts(), trustUnchanged: true }).build();
+  assert.equal(first.stats.shallowScannedFiles, 2);
+  const second = await new ModIndexer({ ...opts(), trustUnchanged: true }).build();
+  assert.equal(second.stats.shallowScannedFiles, 0);
+  assert.equal(second.stats.shallowCacheHits, 2);
+  assert.ok(second.stats.recordsCacheHits > 0);
+
+  // Simulate the file watcher / save handler: invalidate one art asset.
+  // The next trusted rebuild must re-scan exactly that file.
+  recordsCache.invalidate(join(project, "Data", "Includes", "Models", "Tank_SKN.w3x"));
+  const third = await new ModIndexer({ ...opts(), trustUnchanged: true }).build();
+  assert.equal(third.stats.shallowScannedFiles, 1);
+  assert.equal(third.stats.shallowCacheHits, 1);
+  assert.ok(
+    third.assetsById.get("tank_skn")?.some((d) => d.type === "W3DContainer"),
+    "re-scanned w3x asset present",
+  );
+
+  // Invalidate one XML file: exactly its records are re-extracted.
+  recordsCache.invalidate(join(project, "Data", "Includes", "Units.xml"));
+  const fourth = await new ModIndexer({ ...opts(), trustUnchanged: true }).build();
+  assert.equal(fourth.stats.recordsCacheHits, third.stats.recordsCacheHits - 1);
+  assert.ok(
+    fourth.assetsById.get("testtank")?.some((d) => d.type === "GameObject"),
+    "re-parsed XML asset present",
+  );
+
+  // A forced rebuild (ra3modxml.reindex) verifies stats but still reuses
+  // content caches for unchanged files.
+  const forced = await new ModIndexer({ ...opts(), trustUnchanged: false }).build();
+  assert.equal(forced.stats.shallowScannedFiles, 0);
+  assert.equal(forced.stats.shallowCacheHits, 2);
+});
+
+test("index stats include candidate/walk phase timings", async () => {
+  const idx = await buildIndex();
+  assert.equal(typeof idx.stats.candidatesMs, "number");
+  assert.equal(typeof idx.stats.walkMs, "number");
 });
 
 test("w3x with a UTF-8 BOM is indexed with correct offsets", async (t) => {

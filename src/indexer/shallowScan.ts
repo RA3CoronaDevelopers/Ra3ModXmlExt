@@ -60,7 +60,10 @@ export interface ShallowScanError {
 export interface ShallowDocument {
   assets: ShallowAssetRecord[];
   includes: ShallowIncludeRecord[];
-  xiIncludes: ShallowXiIncludeRecord[];
+  /** <xi:include> elements that are direct children of the root. */
+  rootXiIncludes: ShallowXiIncludeRecord[];
+  /** <xi:include> elements nested anywhere else in the document. */
+  nestedXiIncludes: ShallowXiIncludeRecord[];
   defines: ShallowDefineRecord[];
   errors: ShallowScanError[];
 }
@@ -81,7 +84,8 @@ export function scanXmlShallow(text: string): ShallowDocument {
   const errors: ShallowScanError[] = [];
   const assets: ShallowAssetRecord[] = [];
   const includes: ShallowIncludeRecord[] = [];
-  const xiIncludes: ShallowXiIncludeRecord[] = [];
+  const rootXiIncludes: ShallowXiIncludeRecord[] = [];
+  const nestedXiIncludes: ShallowXiIncludeRecord[] = [];
   const defines: ShallowDefineRecord[] = [];
 
   // Depth of the currently open element stack. The document root opens at
@@ -196,11 +200,13 @@ export function scanXmlShallow(text: string): ShallowDocument {
         const href = findAttr(inner, base, "href");
         const xpointer = findAttr(inner, base, "xpointer");
         if (href?.value) {
-          xiIncludes.push({
+          const rec: ShallowXiIncludeRecord = {
             href: href.value,
             xpointer: xpointer?.value ?? null,
             start: lt,
-          });
+          };
+          if (depth === 1) rootXiIncludes.push(rec);
+          else nestedXiIncludes.push(rec);
         }
       }
       if (!selfClosing) depth++;
@@ -210,7 +216,7 @@ export function scanXmlShallow(text: string): ShallowDocument {
     i = gt + 1;
   }
 
-  return { assets, includes, xiIncludes, defines, errors };
+  return { assets, includes, rootXiIncludes, nestedXiIncludes, defines, errors };
 }
 
 /**

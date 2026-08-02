@@ -33,9 +33,10 @@ test("extracts top-level assets, includes, defines and xi:include", () => {
   assert.equal(doc.defines.length, 1);
   assert.equal(doc.defines[0].name, "MODEL_SCALE");
   assert.equal(doc.defines[0].value, "1.0");
-  assert.equal(doc.xiIncludes.length, 1);
-  assert.equal(doc.xiIncludes[0].href, "DATA:Includes/Extra.xml");
-  assert.match(doc.xiIncludes[0].xpointer, /xpointer\(/);
+  assert.equal(doc.rootXiIncludes.length, 1);
+  assert.equal(doc.rootXiIncludes[0].href, "DATA:Includes/Extra.xml");
+  assert.match(doc.rootXiIncludes[0].xpointer, /xpointer\(/);
+  assert.equal(doc.nestedXiIncludes.length, 0);
 
   // Recorded offsets must slice the original text back out.
   const container = doc.assets[0];
@@ -96,5 +97,26 @@ test("nested module payload does not create asset records", () => {
   assert.deepEqual(
     doc.assets.map((a) => a.id),
     ["MESH"],
+  );
+});
+
+test("distinguishes root-level and nested xi:include", () => {
+  const doc = scanXmlShallow(`<AssetDeclaration>
+  <xi:include href="DATA:Top.xml"/>
+  <W3DMesh id="MESH">
+    <SubObject>
+      <RenderObject>
+        <xi:include href="DATA:Nested.xml" xpointer="xmlns(n=uri:ea.com:eala:asset) xpointer(/n:X/child::*)"/>
+      </RenderObject>
+    </SubObject>
+  </W3DMesh>
+</AssetDeclaration>`);
+  assert.deepEqual(
+    doc.rootXiIncludes.map((x) => x.href),
+    ["DATA:Top.xml"],
+  );
+  assert.deepEqual(
+    doc.nestedXiIncludes.map((x) => x.href),
+    ["DATA:Nested.xml"],
   );
 });
