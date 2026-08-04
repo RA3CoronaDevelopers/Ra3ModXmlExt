@@ -2,7 +2,7 @@
   "name": "ra3-mod-xml",
   "displayName": "RA3 Mod XML",
   "description": "Red Alert 3 Mod XML tooling: syntax highlighting, completions, reference navigation and diagnostics for SAGE/BinaryAssetBuilder XML.",
-  "version": "0.1.1",
+  "version": "0.1.9",
   "publisher": "ra3-mod-xml",
   "license": "MIT",
   "engines": {
@@ -22,6 +22,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
+    "onLanguage:xml",
     "workspaceContains:**/Data/Mod.xml",
     "workspaceContains:**/mod.babproj",
     "workspaceContains:**/*.babproj"
@@ -91,6 +92,14 @@
       {
         "command": "ra3modxml.openIndexReport",
         "title": "RA3 Mod XML: Show index report"
+      },
+      {
+        "command": "ra3modxml.clearCache",
+        "title": "RA3 Mod XML: Clear caches and rebuild"
+      },
+      {
+        "command": "ra3modxml.showCacheReport",
+        "title": "RA3 Mod XML: Show cache report"
       }
     ]
   },

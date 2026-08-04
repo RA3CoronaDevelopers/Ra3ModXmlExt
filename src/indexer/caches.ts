@@ -146,6 +146,11 @@ export class IndexRecordsCache {
     return this.map.size;
   }
 
+  /** Iterates [normalized key, entry] pairs (used by disk persistence). */
+  entries(): IterableIterator<[string, IndexRecordsCacheEntry]> {
+    return this.map.entries();
+  }
+
   set(path: string, entry: IndexRecordsCacheEntry): void {
     const key = normKey(path);
     this.map.delete(key);
@@ -222,5 +227,37 @@ export class IncludeResolveCache {
   /** Number of cached resolutions (for diagnostics). */
   get size(): number {
     return this.map.size;
+  }
+}
+
+/**
+ * Monotonic counter for workspace-level invalidations.
+ *
+ * A build captures `snapshot()` when it starts; if `changedSince()` is true
+ * when a phase snapshot is about to be published, files may have changed
+ * mid-build, so the published index is marked stale (and the workspace's
+ * dirty/rebuild mechanism converges to fresh data shortly after).
+ */
+export class InvalidationsEpoch {
+  private value = 0;
+
+  /** Records a new invalidation (content, creation or deletion). */
+  mark(): void {
+    this.value++;
+  }
+
+  /** Returns the current epoch value. */
+  snapshot(): number {
+    return this.value;
+  }
+
+  /** True when at least one invalidation happened since `epoch`. */
+  changedSince(epoch: number): boolean {
+    return this.value !== epoch;
+  }
+
+  /** Current epoch value (read-only accessor). */
+  get current(): number {
+    return this.value;
   }
 }

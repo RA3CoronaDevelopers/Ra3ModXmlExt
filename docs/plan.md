@@ -82,14 +82,17 @@ src/
     asset-types.json   由 tools/extract-asset-types.mjs 生成（TypeId 哈希→类型名）
   indexer/
     includeResolver.ts Include 路径解析（纯 TS，BAB /data /art /audio 顺序）
+    existence.ts       文件集存在性快照（目录枚举 Set，替代逐路径 statSync）
     manifestParser.ts  .manifest 二进制解析 + 类型/ID 推导（纯 TS）
     fileScanner.ts     目录遍历缓存 + Include source 候选收集
     refs.ts            引用目标解析（按 refType / isRef / inheritFrom 过滤，纯 TS）
     shallowScan.ts     大体积美术资产（.w3x 等）顶层浅扫描（纯 TS，不建 DOM）
     records.ts         每文件紧凑索引记录（资产/Define/Include/xi + 行号）
     caches.ts          跨重建持久缓存（DocumentCache / IndexRecordsCache /
-                       IncludeResolveCache）
-    indexer.ts         工作区索引器（资产/Define/流/manifest/w3x 合并）
+                       IncludeResolveCache）+ 失效纪元 InvalidationsEpoch
+    diskCache.ts       跨会话磁盘缓存（gzip JSON、原子写、多信号 stat 校验）
+    indexer.ts         工作区索引器（资产/Define/流/manifest/w3x 合并，
+                       分阶段：XML → art，中间快照可发布）
     types.ts           共享类型
   features/
     completion.ts      补全 provider（元素/属性/值，上下文感知；xs:list 多值按当前段过滤）
@@ -144,8 +147,9 @@ test/
     - 全量解析内存放大约 17 倍（6.3 MB 文本 → +109 MB DOM），不可接受；`scanXmlShallow`
       单次线性扫描只提取顶层 `name+id`、`<Includes>`、`<xi:include>`、`<Defines>`，
       22 MB 文件 ~600 ms、保留内存≈0。
-    - 索引按扩展名三分：`.xml`/`.manifestxml` 全量解析（4 MB 上限不变）；`.w3x` 浅扫描；
-      未知扩展名嗅探文件头（`<` 开头、无 NUL）决定按 XML 浅扫描或二进制登记。
+    - 索引按扩展名三分：`.xml` 全量解析（4 MB 上限不变）；`.w3x` 浅扫描；
+      未知扩展名嗅探文件头（`<` 开头、无 NUL）决定按 XML 浅扫描或二进制登记
+      （manifest 是 `*.manifest` 二进制，不存在 `.manifestxml` 源码格式）。
     - `DocumentCache` / `ShallowScanCache` 由 `ModWorkspace` 持有，每次重建传入新的
       `ModIndexer`；按 `mtimeMs + size` 校验，未变化不重读。Corona 第二次构建
       w3x 重扫数为 0（4,829 次缓存命中）。
@@ -164,6 +168,52 @@ test/
       堆保留确认为构建期可回收垃圾，常驻 ~100MB；强制 reindex ~5-25s。
     - 候选目录扫描并行化；`stats` 新增 `candidatesMs` / `walkMs` / `resolveCalls` /
       `resolveCacheHits` 供索引报告定位耗时。
+16. **分阶段索引与部分可用性**（第十轮，2026-08-03）：索引分两阶段发布——
+    阶段 A（xml）只走 XML + manifest include 链，w3x 只登记进待扫队列；
+    阶段 B（art）浅扫描队列并继续走 w3x 内的 include。阶段 A 结束即发布
+    不可变快照（`snapshotIndex` 深拷贝嵌套 Map/数组），XML/枚举/语法类功能
+    在首建早期即可用；引用类诊断在 `!complete || stale` 时“显示但标注”
+    （code 为 `*-indexing`，消息注明 index incomplete）。快照携带
+    `complete` / `phase` / `stale`，状态栏显示阶段。
+17. **构建中失效与 stale 标记**（第十轮）：watcher 的 change / create /
+    delete 均触发防抖重建；`InvalidationsEpoch` 记录失效次数，快照发布时若
+    期间有失效则标记 stale，由 dirty 机制随后重建收敛；构建失败保留上一个
+    快照而非清空索引。
+18. **多信号文件 stamp**（第十轮）：`IndexedFile.stat` 扩展为
+    `{ size, mtimeMs, birthtimeMs, ctimeMs }`，任一不匹配即重读，为磁盘
+    持久化缓存铺路（FAT32 mtime 2s 粒度、工具保留 mtime 等场景）。
+19. **文件集快照替代 statSync**（第十一轮，2026-08-03）：`ExistenceSnapshot`
+    用**惰性按目录 readdir**（只读查询到的父目录，按目录缓存）回答 include
+    存在性，覆盖根之外才 statSync 回退；盘符根不枚举。首版全量递归枚举使
+    XML 阶段从 27s 涨到 45s，已改为惰性模式（复测 24.0s）。
+    `stats.snapshotHits / snapshotFallbacks` 入报告；Corona 首建 75,926 次
+    查询全部由快照回答、0 回退。
+20. **磁盘持久化缓存**（第十一轮）：`DiskRecordsCache` 持久化 records 缓存
+    （gzip JSON、原子写、identity key）；启动时并发 stat 多信号校验，不匹配
+    丢弃重读；构建后异步回写。Corona 缓存仅 651 KB，冷启动约 11s（原
+    ~2.5 分钟）。
+21. **缓存命令**（第十一轮）：`ra3modxml.clearCache`（清内存 + 磁盘 +
+    强制重建）、`ra3modxml.showCacheReport`（路径/大小/校验统计/命中数）。
+22. **重建插桩**（第十一轮补充）：`buildCount` / `lastBuildTrigger`
+    （initial、save、watcher-*、config、reindex、clear-cache、
+    dirty-followup）进入索引/缓存报告；“RA3 Mod XML” 输出通道记录每次构建
+    的触发原因、phase A 发布时间与完成耗时，用于定位“首建后又重建一次”
+    之类的现象。
+23. **watcher 噪声过滤与 URI 日志**（第十一轮补充）：watcher 事件把触发
+    URI 写入输出通道；路径含 `.git` 段的事件直接忽略（后台 fetch /
+    maintenance 会周期性触碰 `.git`，不应触发重建或 stale 标记）。
+24. **watcher 内容白名单**（第十一轮补充）：临时文件命名模式
+    （`.git`/`.tmp`/`.lock`/`~`/`.swp`/`.bak`/`.orig` 后缀、`.#`/`.~`
+    前缀）全部忽略；`onDidChange` 只响应扩展名白名单（`.xml` / `.w3x`，
+    RA3 合理文本格式为 xml/w3x/lua，lua 暂未索引、manifest 为二进制）或已在
+    索引中的文件；创建/删除仍响应所有真实文件（影响 include 存在性）。
+25. **当前文档局部链 + 逻辑树展开（第十二轮，T1）**：新增 `xpointer.ts` /
+    `logicalTree.ts` / `localScope.ts`。打开文件时按当前文本建立局部 overlay
+    （自身资产 / `$DEFINE` / include 链），并生成展开 `xi:include` 的逻辑树；
+    features 经 `ws.getScope(document)` 拿到 overlay-aware 索引。Poid 引用
+    （`AttachModuleId` / `ModuleId` / `AutoResolveBody` 等）在最近 GameObject
+    子树内解析；未命中不新增诊断（保守策略，避免跨文件误报）。
+    顶层 `<Include type="all">` 暂不并入逻辑树（保留为后续扩展）。
 
 ## 三、实施步骤
 
@@ -182,6 +232,24 @@ test/
 9. [x] Corona 性能与内存优化（第九轮，v0.1.1）：`records.ts` 记录驱动索引、
    `IncludeResolveCache` 零 stat 重建、DOM 元素预算淘汰、w3x LineMap 移除、
    候选并行扫描、阶段计时；Corona 信任重建 2.0s；确认首建 2.5GB 为可回收垃圾。
+10. [x] 部分可用性 + 分阶段索引（第十轮，2026-08-03）：T0 解耦（语法/模型
+    诊断、枚举/子元素补全、Include 链接无索引可用）、A/B 分阶段发布、watcher
+    触发重建 + 失效纪元 stale 标记、stat 多信号扩展；测试 73 → 79。
+11. [x] 冷启动提速（第十一轮，2026-08-03）：文件集快照替代 statSync、
+    磁盘持久化缓存（多信号校验、原子写）、clearCache/showCacheReport 命令；
+    测试 79 → 90；Corona 冷启动 ~11s。
+12. [x] 惰性存在性快照 + 重建插桩（第十一轮补充，2026-08-03）：全量目录枚举
+    改为惰性按目录 readdir（phase A 45s → 24.0s）；新增 buildCount /
+    lastBuildTrigger 与输出通道日志；索引/缓存报告显示构建序号与触发原因。
+13. [x] watcher 噪声过滤 + URI 日志（第十一轮补充，2026-08-03）：输出通道
+    记录 `[watcher-*] <path>`；`.git` 段路径忽略；测试 90 → 91。
+14. [x] watcher 内容白名单（第十一轮补充，2026-08-03）：临时文件命名模式
+    过滤 + 内容变更扩展名白名单 + `isIndexedFile` 兜底；测试 91 → 92。
+15. [x] T1 当前文档局部链 + include 展开（第十二轮，2026-08-03）：局部
+    overlay（不在任何流里的文件也能解析自身引用）+ `xi:include` 逻辑树展开
+    + Poid 局部作用域补全/悬停/跳转；测试 92 → 98。2026-08-04 补充构建期
+    闸门：`getScope` 在重建进行中只返回 parse-only scope，避免与 indexer
+    抢盘（版本 0.1.9）。
 
 ## 四、验证结果（实测）
 
@@ -200,16 +268,11 @@ test/
 - 假设 SDK 路径默认 `C:\Apps\RA3-MODSDK-X`（与 prompts 一致），可在设置中修改。
 - 假设补全/导航以“文本语义分析”为主，不做完整 XSD 校验（BAB 才是权威校验器）。
 - 开放：是否发布到 VS Code Marketplace（需要 publisher）——本期先保证本地 `vsce package` 可安装。
-- 开放：**“宏展开”式虚拟合并**（用户提议，方向已确认）：解析前先把 `xi:include`
-  （以及顶层 `<Include type="all">`、`inheritFrom` 继承合并）展开成不含 include 的
-  文档树，再对展开后的树做 XSD 校验、补全与诊断——与 BAB 编译时把整个 Mod 合并成
-  一份大 XML 的行为一致。展开树需携带**来源追溯**（错误/跳转仍定位到原始文件），
-  并处理 xpointer 子集解析与 include 循环。当前仅做到：目标文件可索引、可导航、
-  缺失可诊断；`xi:include` 本身不参与 XSD 校验（第五轮）。
-  该功能也是“GameObject 内模块 id 局部作用域解析”（第四轮遗留）的地基。
-  详细设计备忘见下一节。
+- 开放：**“宏展开”式虚拟合并**（用户提议，方向已确认）：`xi:include` 已按逻辑树
+  展开（第十二轮，见第六节）；顶层 `<Include type="all">` 与 `inheritFrom` +
+  `xai:joinAction` 的深合并仍未实现，后续如需要“当前文档视角的全量合并诊断”再继续。
 
-## 六、include 展开设计备忘（2026-08-01，待实施）
+## 六、include 展开设计备忘（2026-08-01；xi:include 部分已实施于第十二轮）
 
 > 目的：集中记录 include 处理相关的现状、结论与设计，下次遇到 include 问题时从这里继续，
 > 并在实施后把结果回写本节。
@@ -222,7 +285,7 @@ test/
 | `reference` → builtmods manifest 解析 / 缺失回退占位 XML | 已实现 |
 | 嵌套 `xi:include`（任意层级）：目标可索引、缺失报 `include-not-found`、Ctrl+点击跳转、`href` hover 解析目标 | 已实现（第二轮 + 第五轮） |
 | `xi:include` 及其属性不参与 XSD 校验（外来命名空间守卫 `isXsdElementName` / `isXsdAttributeName`） | 已实现（第五轮） |
-| include 目标内容“虚拟合并”进父文档的逻辑树 | **未实现**（本文档主题） |
+| include 目标内容“虚拟合并”进父文档的逻辑树 | 已实现 `xi:include`（第十二轮）；顶层 `<Include type="all">` 仍不展开 |
 
 ### 2. 已确认的方向
 

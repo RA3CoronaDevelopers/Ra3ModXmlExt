@@ -607,7 +607,8 @@ AttachTest `Harbinger Gunship\GameObject.xml` 中 `<Model Name="AUGunship_SKN"/>
 
 两条是同一缺失定义的两种呈现（诊断 + hover），不是两个独立 bug。
 `W3DContainer:AUGunship_SKN` 确实由 mod 定义——但定义在
-`Harbinger Gunship\W3X\AUGUNSHIP_SKN.w3x` 里，而索引器只解析 `.xml` / `.manifestxml`。
+`Harbinger Gunship\W3X\AUGUNSHIP_SKN.w3x` 里，而索引器只解析 `.xml`
+（manifest 是 `*.manifest` 二进制，不存在 `.manifestxml` 源码格式）。
 
 ### 关键事实（实测）
 
@@ -644,7 +645,7 @@ AttachTest `Harbinger Gunship\GameObject.xml` 中 `<Model Name="AUGunship_SKN"/>
    单次线性扫描，只提取顶层元素 `name + id`（含精确 offset）、顶层 `<Includes>`
    的 `Include@type/source`、任意层级 `<xi:include>` 的 `href/xpointer`、`<Defines>`
    常量；注释 / CDATA / DOCTYPE / PI 整体跳过；属性解析兼容引号内 `>` 与 `/`。
-2. **索引模式三分**：`.xml`/`.manifestxml` 全量解析（4 MB 上限不变）；
+2. **索引模式三分**：`.xml` 全量解析（4 MB 上限不变）；
    `.w3x` 一律浅扫描；未知扩展名先嗅探文件头（512 字节，BOM/空白后以 `<` 开头且无
    NUL 字节 → 按 XML 浅扫描，否则按二进制仅登记）。w3x 自身的 `<Includes>` 与
    嵌套 `xi:include` 会继续被 walk（BAB 语义）。
@@ -661,7 +662,8 @@ AttachTest `Harbinger Gunship\GameObject.xml` 中 `<Model Name="AUGunship_SKN"/>
 
 - 单元测试 **53 → 63 全绿**：新增 `test/shallowScan.test.mjs`（顶层资产 / Includes /
   xi:include / Defines / 引号内 `>` / CDATA / 未闭合标签 / 数值载荷不产生记录）；
-  indexer 新增 w3x 链、`.w3d` 嗅探、二进制 `.dds` 跳过、跨重建缓存命中、
+  indexer 新增 w3x 链、未知扩展名 XML 嗅探（fixture 用 `.dat`）、二进制 `.dds`
+  跳过、跨重建缓存命中、
   BOM 偏移断言；xmlParser 新增 `stripBom` 用例。
 - AttachTest 实机：
   - 首次构建 1.2 s，浅扫 62 个文件；`Model@Name=AUGunship_SKN` →
@@ -762,3 +764,303 @@ resolve 缓存命中与"信任重建 0 次重解析"断言。
   并行浅扫描（worker）或把 w3x 顶层记录持久化到磁盘缓存。
 - `ra3modxml.reindex` 出于正确性会清空解析缓存（可能 ~15-25s）；如接受 watcher
   可靠性可改为保留。
+
+---
+
+## 十五、问题分析（第十轮，2026-08-03）：索引未完成时的部分可用性与分阶段索引
+
+### 目标
+
+第九轮遗留：Corona 首次全量建索引约 4 分钟（2.6GB w3x 读取 + 冷 statSync），
+期间插件所有功能被整体关闭（`ws.index == null`）。本轮让插件在索引完成前
+分层可用，并把最耗时的 w3x 扫描放到后台阶段。
+
+### 现状证据
+
+- `diagnostics.update` 无索引时直接清空诊断：连 XML 语法错误、未知元素、缺 id
+  这类不依赖索引的检查也被关闭；
+- 补全的 `attribute-value` / `content` 分支无索引直接返回空，但枚举 / 布尔 /
+  Include type / 子元素补全并不需要索引（`contentItems` 甚至没用 idx）；
+- hover / 文档链接的 Include 解析只依赖搜索路径（settings），不需要索引；
+- Find All References 完全不使用索引。
+
+### 设计
+
+1. **索引状态模型**：`ModIndex` 增加 `complete` / `phase`（`"xml" | "art"`）/
+   `stale`；`stats` 增加 `phase` / `complete` / `deferredArtFiles` /
+   `artScanMs`。
+2. **分阶段索引**：
+   - 阶段 A（xml）：walk include 链时只**登记** w3x / 嗅探 XML 文件
+     （`readDocument` 的 `deferArt` 模式），不读内容；manifest、项目 XML、
+     mapmetadata 全部正常索引；结束后发布不可变快照；
+   - 阶段 B（art）：按队列浅扫描 w3x、应用资产记录，并继续走 w3x 内的
+     Include / xi:include（此时新遇到的美术文件立即扫描，不再入队）；
+   - 快照不可变性的关键：`addAsset` 在阶段 B 仍会向数组 push，所以阶段 A
+     发布时必须复制 `assets` / `assetsById` / `defines` / `streams.files` /
+     `diagnostics`（`snapshotIndex` 深拷贝嵌套 Map/数组）。
+3. **部分可用性（T0 解耦）**：
+   - 诊断：语法错误、未知元素/属性、缺 id、同文件重复 ID、Include 目标存在性
+     不再依赖索引；引用 / `$DEFINE` / 跨文件重复在索引未完成或 stale 时
+     “显示但标注”：code 变为 `unresolved-reference-indexing` /
+     `undefined-define-indexing`，消息追加 `(index incomplete — may be a
+     false positive)`；跨文件重复追加 `(based on a partial index)`；
+   - 补全：枚举 / 布尔 / Include type / `xai:joinAction` / 子元素（content）
+     在无索引时可用；资产 ID / define / include source 仍需索引；
+   - hover / 文档链接：Include source / `xi:include href` 用 settings 搜索路径
+     即可解析；无索引时引用值 hover 提示 “Index is still building”。
+4. **构建中文件被修改**：
+   - watcher 的 change / create / delete 现在都会 `scheduleRebuild()`（此前
+     只 `invalidate`，外部修改后没有任何东西触发重建）；
+   - 新增 `InvalidationsEpoch`：`invalidate` / `invalidateExistence` 递增；
+     构建开始时记录 epoch，发布每个快照（含最终）时若 epoch 变化则标记
+     `stale`（状态栏显示 `(stale)`）；dirty 机制保证构建结束后立即再重建收敛；
+   - 构建失败时保留上一个可用快照并标记 stale，不再清空索引。
+5. **stat 结构扩展**：`IndexedFile.stat` 从 `{ mtimeMs, size }` 变为
+   `{ mtimeMs, size, birthtimeMs, ctimeMs }`，为磁盘持久化缓存铺路
+   （FAT32 的 mtime 只有 2 秒粒度，多信号可捕捉“保留 mtime 的整体替换写入”）。
+
+### 验证
+
+- 单元测试 **73 → 79 全绿**：
+  - indexer：phase-A 快照发布（XML/manifest 资产可用、美术资产缺席）、快照
+    不可变性、`deferredArtFiles` 统计、`artScanMs`、mtime 变更强制重读；
+  - caches：`InvalidationsEpoch` 递增 / 快照语义；
+  - completion：无索引时枚举 / 元素名 / 属性名 / 子元素补全仍工作。
+- `tsc` + esbuild 构建通过。
+
+### 实机复现与补充修复（2026-08-03）
+
+在 Corona 上实测新版索引器：
+
+- 阶段 A（xml）**27.0s** 发布：54,283 资产（含 manifest 35,322）、8,399 文件、
+  4,797 个 w3x 待扫；最终 **118.0s**：64,868 资产、8,976 文件、4,829 浅扫
+  （artScanMs ≈ 91s，walkMs ≈ 26s）。
+- `OnSeaUnitCrate.xml` 中的引用在阶段 A 即可解析（`Locomotor=JapanEggLocomotor`
+  、`CommandSet=EmptyCommandSet` 均有候选）；`LocomotorSet@Condition` 是
+  19 个枚举值的模型属性，无索引时即可补全。
+
+由此确认两个真实体验问题并修复：
+
+1. **状态栏初始不显示 indexing**：`workspaceContains` 激活事件在大目录上扫描
+   较慢，打开工作区后扩展尚未激活，看起来“没有任何功能”。`activationEvents`
+   增加 `onLanguage:xml`，打开任意 XML 文件即激活；同时各 provider 增加
+   `isRa3Workspace()` 守卫，避免在非 RA3 工作区误补全/误诊断。
+2. 索引构建中执行 “Show index report” 提示 “no index available” 有误导 →
+   新增 `ws.isBuilding`，构建中改为提示 “index is still building”。
+
+版本 **0.1.1 → 0.1.2**（重新打包 `ra3-mod-xml-0.1.2.vsix`）。
+
+---
+
+## 十六、问题分析（第十一轮，2026-08-03）：冷启动磁盘缓存与首建 statSync 消除
+
+### 目标
+
+第十轮后 Corona 首次建索引仍需 ~2 分钟，且每次新会话（重启 VS Code）都要
+重来一遍。本轮做两件事：
+
+1. **文件集快照替代 statSync**：`resolveSource` 的逐 base `statSync` 存在性
+   检查（Corona 首建约 11 万次）改为目录枚举建立的 `Set` 查询；
+2. **磁盘持久化缓存**：records 缓存（含 w3x 浅扫记录）跨会话落盘，冷启动
+   只做 stat 校验，不再重读 2.6GB 美术资产。
+
+### 设计
+
+1. **ExistenceSnapshot**（`src/indexer/existence.ts`）：
+   - **惰性按目录 readdir**：只在实际查询某个候选路径时读取它的父目录
+     （`readdirSync` + `withFileTypes`，不 stat 单个文件），结果按目录缓存；
+     不做首建前的全量递归枚举（该方案曾让 XML 阶段从 27s 涨到 45s）；
+   - 覆盖根判定：候选父目录落在根内 → 目录条目 Set 查询（`hits`）；落在
+     根外 → `statSync` 回退（`fallbacks`）；
+   - 盘符根（`C:\` 等）与不存在的根不枚举，避免遍历整个磁盘；
+   - 子根被更宽的根覆盖时跳过（如 `sdkDir` 覆盖 `sdkDir/SageXml`）。
+2. **DiskRecordsCache**（`src/indexer/diskCache.ts`）：
+   - gzip JSON，原子写（tmp + rename），版本号 + identity key
+     （项目/SDK/设置哈希，配置变化自动忽略旧缓存）；
+   - 每条记录保存多信号 stamp `{ size, mtimeMs, birthtimeMs, ctimeMs }`；
+   - 加载时并发（32）stat 校验，不匹配/缺失丢弃，构建时重读；
+   - 缺失/损坏/身份不符 → 空结果，不报错。
+3. **workspace 集成**：
+   - 构建前若内存 records 缓存为空，从磁盘加载并校验（状态栏显示
+     “validating cache…”）；构建成功后异步回写（entries 先快照，避免与
+     下一次构建竞争）；
+   - 新命令 `ra3modxml.clearCache`（清内存 + 删磁盘文件 + 强制重建）与
+     `ra3modxml.showCacheReport`（缓存路径/大小/加载校验统计/命中数）。
+
+### 实测（Corona）
+
+| 场景 | 结果 |
+|---|---|
+| 首次构建 | 118.7s（phaseA **24.0s**）；snapshotHits **75,926**、fallbacks **0**、resolveCalls 11,061 |
+| 保存缓存 | 0.1s；gzip 后 **651 KB** |
+| 加载 + stat 校验 | 0.2s（8,976 条全部校验通过） |
+| 新会话二次构建 | **10.9s**（w3x 重扫 0、shallowCacheHits 4,829、recordsCacheHits 4,166） |
+
+冷启动（加载 + 校验 + 构建）约 **11s**，对比之前每次 ~2.5 分钟。
+
+### 测试与验证
+
+- 单元测试 **79 → 90 全绿**：
+  - `existence.test.mjs`：覆盖/未覆盖判定、hits/fallbacks、盘符根识别、
+    搜索 base 枚举、`resolveSource` 快照命中与 statSync 回退；
+  - `diskCache.test.mjs`：roundtrip、原子写无残留 tmp、stat 变更丢弃、
+    identity 不符忽略、损坏文件空结果、clear、key 稳定性；
+  - `caches.test.mjs` 增加 `entries()`；indexer 统计断言 snapshotHits。
+- `tsc` + esbuild + `vsce package` 通过。
+
+### 遗留
+
+- 首次构建 phase A 现在包含快照目录枚举成本（Corona 实测约 +10-17s，后续
+  构建由 walker 缓存吸收）；如 SDK 根目录特别大可再优化根覆盖策略。
+- w3x 并行/流水线浅扫描仍未做（HDD 收益存疑，SSD 再做）。
+
+### 补充（用户实测反馈，2026-08-03）
+
+用户在 0.1.3 上删除 workspace storage 缓存后实测：
+
+- XML 阶段约 45s（比之前 27s 多）→ 根因是磁盘缓存轮实现的**全量目录枚举
+  快照**在首建前递归枚举 SDK 根等搜索根。已改为惰性按目录 readdir，复测
+  phase A **24.0s**，statSync 消除效果不变（75,926 次快照命中、0 回退）。
+- “show index report 显示 Indexed in 1.1s、0 浅扫、8995 缓存命中”与观察
+  不一致 → 首建完成后又发生了一次信任重建（follow-up）。为定位触发源，
+  新增**重建插桩**：`buildCount` / `lastBuildTrigger`（initial、save、
+  watcher-create/change/delete、config、reindex-command、clear-cache、
+  dirty-followup）+ “RA3 Mod XML” 输出通道（每次构建记录 trigger、phase A
+  发布时间、完成耗时）；索引报告与缓存报告均显示构建序号与触发原因。
+
+### 补充 2（0.1.4 日志复现，2026-08-03）
+
+0.1.4 输出通道日志：
+
+- build #1：phase A 31.4s、done 120.1s、**stale=true**；
+- build #2：`dirty-followup (initial)`，0.6s（报告计时不一致的直接来源）；
+- build #3/#4/#5：每 ~35s 一次 `watcher-change`，每次 0.5s 重建。
+
+build #1 的 stale=true 与周期性 watcher-change 均不符合预期：说明有后台进程
+在周期性触碰被监视目录（最可疑是 `.git` 内部文件，如后台 fetch/maintenance）。
+处理：
+
+1. watcher 事件现在把**触发 URI 写入输出通道**（`[watcher-change] <path>`），
+   可直接定位是哪个文件/目录在变化；
+2. 新增 `isWatcherNoisePath`：路径含 `.git` 段的事件直接忽略（不 invalidate、
+   不标记 stale、不触发重建）；单元测试 90 → 91。
+
+版本 **0.1.4 → 0.1.5**。
+
+### 补充 3（0.1.5 日志复现，2026-08-03）
+
+0.1.5 日志中周期性重建已消失，但首建期间仍有一次：
+
+```
+[watcher-change] d:\...\corona\Data\Neutral\Crate\UnitCrate.xml.git
+```
+
+该文件**并不存在**（疑似其他 VSCode 扩展产生的瞬时临时文件），且它是
+`*.xml.git` 文件名，不是 `.git` 目录段，绕过了上一轮过滤；它也导致 build #1
+stale=true 并触发 follow-up。处理（按用户建议的扩展名白名单思路）：
+
+1. `isWatcherNoisePath` 增加临时文件命名模式：`.git` / `.tmp` / `.lock` /
+   `~` / `.swp` / `.bak` / `.orig` 后缀，以及 `.#` / `.~` 前缀；
+2. `onDidChange` 只响应**内容相关**文件：扩展名白名单（`.xml` / `.w3x`；
+   领域修正：RA3 合理文本格式为 xml/w3x/lua，lua 暂未索引，manifest 为
+   `*.manifest` 二进制，不存在 `.manifestxml`）或已在当前索引中的文件
+   （`ModIndexer.isIndexedFile`，覆盖被嗅探为 XML 的未知扩展名）；纹理等
+   二进制内容变更不触发重建；
+3. 创建/删除仍对所有真实文件响应（影响 include 存在性），临时文件模式除外。
+
+测试 91 → 92；版本 **0.1.5 → 0.1.6**。
+
+### 遗留（此处的磁盘缓存与文件集快照已在第十一轮完成，T1 已在第十二轮完成）
+
+- w3x 文件名启发式定向扫描（按约定后续再做）。
+- `AssetIdList` 等“任意资产 ID 列表”的引用语义建模。
+- Find All References 目前仍是全文搜索，未走索引（对应需求 P1 高效搜索）。
+
+---
+
+## 十七、问题分析（第十二轮，2026-08-03）：当前文档局部链与 include 逻辑树展开（T1）
+
+### 目标
+
+上一轮遗留的 T1：让**不在任何全局流里的文件**也能解析自身引用，并为 GameObject
+内模块 `id` 的局部作用域（`AttachModuleId` / `ModuleId` / `AutoResolveBody` 等）
+铺路。两件事一起做：
+
+1. **T1a 文档局部 overlay**：当前打开的文档（含未保存文本）自身资产 / `$DEFINE`
+   及其 include 链进入一个轻量局部索引，与全局索引叠加使用；
+2. **T1b 逻辑树展开**：`xi:include` 按现有 `xpointer` 子集拼入当前文档的逻辑树，
+   使 include 进来的内容获得正确的父上下文，并让 Poid 引用能在同一 GameObject
+   子树内解析。
+
+### 现状证据
+
+- 全局索引只从 `Data/Mod.xml` 与 `additionalmaps/mapmetadata_*.xml` 出发；
+  `Data/Standalone.xml` 这类未进流的文件，其自身 `GameObject` / `$DEFINE` 不会
+  出现在 `ws.index`，`inheritFrom`、`CommandSet` 全部无法解析；
+- `xi:include` 此前只做到“目标文件可索引 / 缺失可诊断”，没有拼入当前文档树；
+  include 进来的 `TruckDraw` 等模块拿不到 `Draws` 子元素的上下文类型；
+- `isLocalReferenceAttribute` 对所有 Poid 属性一律“不检查、不解析”，导致
+  同一 GameObject 内完全可静态判断的模块引用也没有 hover / 跳转 / 补全。
+
+### 设计
+
+1. **共享 `xpointer.ts`**：`localName` / `findXPointerContainer` 从 indexer 迁出，
+   全局索引与局部展开共用同一份 xpointer 子集实现。
+2. **`logicalTree.ts`**：
+   - 按解析器扁平元素表预建逻辑节点壳（保留原始 `sourceFile` 与偏移），再按
+     真实根 + 容错孤儿根遍历，重建 parent/child 链；
+   - `xi:include` 解析 href → `readDom` 目标 → 按 `xpointer` 选择容器子节点 →
+     拼入逻辑父元素；目标缺失 / 环 / 超深时跳过（环与深度用 visited + 64）；
+   - 保留 xi 节点本身在 `elements` 中，hover 仍可解释 XInclude。
+3. **`localScope.ts`**：
+   - `buildDocumentScope` 返回原始 parse、逻辑树、per-source LineMap、局部
+     overlay 与 overlay-aware merged index；
+   - overlay 沿 `<Include type="all/instance">` 与 `xi:include` 递归收集资产 /
+     Define；`reference` 指向 manifest，资产由全局索引提供，不重复解析；
+   - `withLocalOverlay` 不复制全局 Map（Corona ~65k 资产），只把 overlay 挂到
+     `ModIndex.local`，查询函数“局部优先、全局兜底”。
+4. **workspace 集成**：`getScope(document)` 按 URI + 文档 version + 全局索引
+   代次缓存；全局索引发布 / 文件关闭时失效；首个 indexer 创建前的兜底读取走
+   `fallbackRead`（小 XML 直接解析）。
+5. **features 接入**：
+   - diagnostics / hover / navigation / completion 改从 `getScope` 取逻辑树与
+     merged index；诊断只上报 `sourceFile === 当前文件` 的节点；
+   - 引用解析 / 补全 / Define 查询支持 `idx.local` 优先；
+   - Poid 属性：`AttachModuleId` / `ModuleId` / `UpdateModuleId` 等可在最近
+     GameObject 子树内补全、hover、跳转；未命中**不新增诊断**（保守，避免
+     “武器引用另一 GameObject 模块”这类跨文件语义误报）；
+   - 导航对当前未保存文件优先用编辑器文本定位，再回退磁盘 DOM。
+
+### 验证
+
+- 单元测试 **92 → 98 全绿**：
+  - `localScope.test.mjs`：未进流文件 overlay（自身资产 / Define / instance
+    include 链）、inheritFrom 局部解析、xi:include 展开后模块上下文类型、
+    Poid 引用找到 include 进来的兄弟模块、局部定义优先于全局同名定义、
+    xi:include 环终止；
+  - `completion.test.mjs`：Poid 属性只补全所在 GameObject 子树内的 id。
+- `tsc` / `esbuild` 构建通过（打包验证见版本发布步骤）。
+
+### 边界与后续
+
+- 顶层 `<Include type="all">` 仍**不**并入逻辑树：它通常是独立整文件或大体积
+  w3x，展开收益与风险不成比例；如需要“当前文档视角的全量合并诊断”再单独做。
+- `AttachModuleId` 若出现在独立 `WeaponTemplate`（不在 GameObject 子树内），
+  本轮仍不解析；等真实样本确认跨文件语义后再扩展。
+- 未命中 Poid 不报诊断是刻意保守，后续可加配置项开启。
+
+版本 **0.1.7 → 0.1.8**。
+
+### 补充：构建期局部作用域闸门（2026-08-04）
+
+用户清空缓存后在 Corona 上测得 phase A **101.2s** / 完成 **254.6s**，明显高于
+第十一轮冷建基线（phase A 约 24s / 总约 118s）。代码审查确认 T1 没有改动 indexer
+的构建路径（`localScope` / `logicalTree` 不参与 `build()`），但自动诊断在构建中
+会触发 `getScope()`，可能和 indexer 抢磁盘 / CPU。
+
+修复：`getScope()` 在 `building === true` 时返回 **parse-only 轻量 scope**
+（只解析当前文件，不沿 include 链读盘、不展开逻辑树）；构建完全结束后再刷新
+全量局部 scope。这样首建期间诊断 / 补全仍可用，但不会拖慢索引。索引报告与
+输出通道同步增加 `walk / candidates / art` 耗时分解，便于下次直接定位慢在哪一段。
+
+版本 **0.1.8 → 0.1.9**。

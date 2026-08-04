@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { dirname } from "node:path";
-import { LineMap, parseXml, type XmlElement } from "../language/xmlParser";
+import { LineMap, type XmlElement } from "../language/xmlParser";
 import { resolveElementType } from "../language/typeContext";
 import { resolveSource, buildSearchPaths } from "../indexer/includeResolver";
 import * as model from "../model/schemaModel";
@@ -8,8 +8,11 @@ import type { ModWorkspace } from "../workspace";
 import type { ModIndex } from "../indexer/types";
 import {
   isReferenceAttributeOfType,
+  mergeLocalAndGlobalDefs,
   resolveReferenceTargetsForType,
 } from "../indexer/refs";
+import type { LogicalElement } from "../indexer/logicalTree";
+import { scopePathKey } from "../indexer/localScope";
 
 export class Ra3Diagnostics {
   private collection: vscode.DiagnosticCollection;
@@ -19,15 +22,19 @@ export class Ra3Diagnostics {
   }
 
   async update(document: vscode.TextDocument): Promise<void> {
-    const idx = this.ws.index;
-    if (!idx) {
+    if (!this.ws.isRa3Workspace()) {
       this.collection.set(document.uri, []);
       return;
     }
+    const scope = await this.ws.getScope(document);
+    const idx = scope.merged;
     const text = document.getText();
     const lineMap = new LineMap(text);
-    const doc = parseXml(text);
+    const doc = scope.parse;
     const diags: vscode.Diagnostic[] = [];
+    // Reference/duplicate checks are provisional while the index is
+    // incomplete or stale: "not found" may be a false positive.
+    const provisional = idx ? !idx.complete || idx.stale === true : false;
 
     for (const err of doc.errors) {
       diags.push(
@@ -44,7 +51,15 @@ export class Ra3Diagnostics {
     }
 
     if (doc.root) {
-      this.checkElements(doc.root, doc, lineMap, idx, document, diags);
+      this.checkElements(
+        scope.expanded.root,
+        scope.expanded,
+        lineMap,
+        idx,
+        document,
+        diags,
+        provisional,
+      );
     }
 
     this.collection.set(document.uri, diags);
@@ -59,19 +74,29 @@ export class Ra3Diagnostics {
   }
 
   private checkElements(
-    root: XmlElement,
-    doc: { elements: XmlElement[] },
+    root: LogicalElement | null,
+    doc: { elements: LogicalElement[] },
     lineMap: LineMap,
-    idx: ModIndex,
+    idx: ModIndex | null,
     document: vscode.TextDocument,
     diags: vscode.Diagnostic[],
+    provisional: boolean,
   ): void {
     const settings = this.ws.settings;
     const fileDuplicates = new Map<string, { line: number }>();
 
     for (const el of doc.elements) {
+      // Only report diagnostics for nodes that belong to the document being
+      // edited. Nodes spliced in through xi:include keep their own source
+      // file and are diagnosed when that file is opened.
+      if (scopePathKey(el.sourceFile) !== scopePathKey(document.uri.fsPath)) {
+        continue;
+      }
       const local = localName(el.name);
-      const isTopLevel = el.parent === root && !["Tags", "Includes", "Defines"].includes(local);
+      const isTopLevel =
+        root !== null &&
+        el.parent === root &&
+        !["Tags", "Includes", "Defines"].includes(local);
       const range = tagRange(document, el);
 
       // Top-level assets must have an id.
@@ -111,6 +136,7 @@ export class Ra3Diagnostics {
             document,
             idx,
             diags,
+            provisional,
           );
         }
       }
@@ -169,6 +195,7 @@ export class Ra3Diagnostics {
             document,
             idx,
             diags,
+            provisional,
           );
         }
       }
@@ -184,12 +211,17 @@ export class Ra3Diagnostics {
     type: string,
     id: string,
     document: vscode.TextDocument,
-    idx: ModIndex,
+    idx: ModIndex | null,
     diags: vscode.Diagnostic[],
+    provisional: boolean,
   ): void {
+    if (!idx) return;
     const byType = idx.assets.get(type);
-    const defs = byType?.get(id.toLowerCase());
-    if (!defs || defs.length < 2) return;
+    const defs = mergeLocalAndGlobalDefs(
+      idx.local?.assets.get(type)?.get(id.toLowerCase()),
+      byType?.get(id.toLowerCase()),
+    );
+    if (defs.length < 2) return;
     const self = defs.filter(
       (d) =>
         d.origin === "project" &&
@@ -211,7 +243,8 @@ export class Ra3Diagnostics {
       diags.push(
         this.diag(
           range,
-          `Duplicate id "${id}" for <${type}> (also defined in ${other.file})`,
+          `Duplicate id "${id}" for <${type}> (also defined in ${other.file})` +
+            (provisional ? " (based on a partial index)" : ""),
           vscode.DiagnosticSeverity.Error,
           "duplicate-id",
         ),
@@ -225,8 +258,9 @@ export class Ra3Diagnostics {
     value: string,
     attr: { valueStart: number; valueEnd: number },
     document: vscode.TextDocument,
-    idx: ModIndex,
+    idx: ModIndex | null,
     diags: vscode.Diagnostic[],
+    provisional: boolean,
   ): void {
     if (!value) return;
     const range = new vscode.Range(
@@ -238,13 +272,19 @@ export class Ra3Diagnostics {
     const defineRe = /\$([A-Za-z_][A-Za-z0-9_]*)/g;
     let m: RegExpExecArray | null;
     while ((m = defineRe.exec(value)) !== null) {
-      if (!idx.defines.has(m[1].toLowerCase())) {
+      if (
+        idx &&
+        !(idx.local?.defines.has(m[1].toLowerCase()) ??
+          idx.defines.has(m[1].toLowerCase()))
+      ) {
+        const code = provisional ? "undefined-define-indexing" : "undefined-define";
         diags.push(
           this.diag(
             range,
-            `Undefined define "$${m[1]}"`,
+            `Undefined define "$${m[1]}"` +
+              (provisional ? " (index incomplete — may be a false positive)" : ""),
             vscode.DiagnosticSeverity.Warning,
-            "undefined-define",
+            code,
           ),
         );
       }
@@ -253,10 +293,13 @@ export class Ra3Diagnostics {
     if (value.startsWith("$") || value.startsWith("=")) return;
     const severity = this.ws.settings.reportUnresolvedReferences;
     if (severity === "none") return;
+    if (!idx) return;
     if (!isReferenceAttributeOfType(elType, attrName)) return;
     const targets = resolveReferenceTargetsForType(idx, elType, attrName, value);
     if (targets.length) return;
-    const anyDef = idx.assetsById.has(value.toLowerCase());
+    const anyDef =
+      (idx.local?.assetsById.has(value.toLowerCase()) ?? false) ||
+      idx.assetsById.has(value.toLowerCase());
     const attrRef = model
       .attributesOfType(elType)
       .find((a) => a.name === attrName);
@@ -265,16 +308,20 @@ export class Ra3Diagnostics {
       : attrRef?.isRef
         ? "of the expected declared type"
         : "matching";
+    const code = provisional ? "unresolved-reference-indexing" : "unresolved-reference";
+    const baseMessage = anyDef
+      ? `Reference "${value}" has no definition ${expected} (ids with the same name exist for other types)`
+      : `Unresolved reference "${value}" (not found in the current index)`;
     diags.push(
       this.diag(
         range,
-        anyDef
-          ? `Reference "${value}" has no definition ${expected} (ids with the same name exist for other types)`
-          : `Unresolved reference "${value}" (not found in the current index)`,
+        provisional
+          ? `${baseMessage} (index incomplete — may be a false positive)`
+          : baseMessage,
         severity === "warning"
           ? vscode.DiagnosticSeverity.Warning
           : vscode.DiagnosticSeverity.Information,
-        "unresolved-reference",
+        code,
       ),
     );
   }
@@ -282,7 +329,7 @@ export class Ra3Diagnostics {
   private checkInclude(
     el: XmlElement,
     document: vscode.TextDocument,
-    idx: ModIndex,
+    idx: ModIndex | null,
     diags: vscode.Diagnostic[],
   ): void {
     const typeAttr = el.attrs.find((a) => a.name === "type");
@@ -301,12 +348,18 @@ export class Ra3Diagnostics {
       );
     }
     if (!sourceAttr?.hasValue) return;
+    const searchPaths = idx
+      ? buildSearchPaths(idx.sdkDir, idx.projectDir)
+      : this.ws.searchPaths();
+    if (!searchPaths) return;
     const resolved = resolveSource(
       sourceAttr.value,
       dirname(document.uri.fsPath),
-      buildSearchPaths(idx.sdkDir, idx.projectDir),
+      searchPaths,
     );
-    if (!resolved.path && !idx.sourceCandidates.some((c) => c.source === sourceAttr.value)) {
+    const candidateHit =
+      idx?.sourceCandidates.some((c) => c.source === sourceAttr.value) ?? false;
+    if (!resolved.path && !candidateHit) {
       diags.push(
         this.diag(
           new vscode.Range(

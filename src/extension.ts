@@ -44,7 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.languages.registerReferenceProvider(
       XML_SELECTOR,
-      new Ra3ReferenceProvider(),
+      new Ra3ReferenceProvider(ws),
     ),
   );
   context.subscriptions.push(
@@ -56,19 +56,26 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.languages.registerDocumentSymbolProvider(
       XML_SELECTOR,
-      new Ra3DocumentSymbolProvider(),
+      new Ra3DocumentSymbolProvider(ws),
     ),
   );
   context.subscriptions.push(
     vscode.languages.registerDocumentSemanticTokensProvider(
       XML_SELECTOR,
-      new Ra3SemanticTokensProvider(),
+      new Ra3SemanticTokensProvider(ws),
       RA3_SEMANTIC_TOKENS_LEGEND,
     ),
   );
 
   const diagnostics = new Ra3Diagnostics(ws);
   context.subscriptions.push(diagnostics);
+  // Refresh diagnostics for every open XML document whenever a new index
+  // snapshot is published (XML phase, art phase, stale/final rebuild).
+  ws.onIndexUpdate = () => {
+    for (const doc of vscode.workspace.textDocuments) {
+      if (doc.languageId === "xml") void diagnostics.update(doc);
+    }
+  };
 
   const diagnosticTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const scheduleDiagnostics = (doc: vscode.TextDocument) => {
@@ -110,7 +117,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidSaveTextDocument((doc) => {
       if (doc.languageId !== "xml") return;
       ws.invalidate(doc.uri.fsPath);
-      ws.scheduleRebuild();
+      ws.scheduleRebuild("save");
       void diagnostics.update(doc);
     }),
   );
@@ -120,31 +127,60 @@ export function activate(context: vscode.ExtensionContext): void {
         // Search paths / builtmods locations may have changed: cached include
         // resolutions and manifest lookups are no longer valid.
         ws.invalidateExistence();
-        ws.scheduleRebuild();
+        ws.scheduleRebuild("config");
       }
     }),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("ra3modxml.reindex", () => ws.rebuild(true)),
+    vscode.commands.registerCommand(
+      "ra3modxml.reindex",
+      () => void ws.rebuild(true, "reindex-command"),
+    ),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ra3modxml.clearCache", () => {
+      ws.clearCaches();
+      void vscode.window.showInformationMessage(
+        "RA3 Mod XML: caches cleared; rebuilding from scratch…",
+      );
+    }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ra3modxml.showCacheReport", async () => {
+      void vscode.window.showInformationMessage(await ws.cacheReport(), {
+        modal: false,
+      });
+    }),
   );
   context.subscriptions.push(
     vscode.commands.registerCommand("ra3modxml.openIndexReport", () => {
       const idx = ws.index;
       if (!idx) {
+        if (ws.isBuilding) {
+          void vscode.window.showInformationMessage(
+            "RA3 Mod XML: index is still building — check the status bar. " +
+              "Most features become available after the XML phase.",
+          );
+          return;
+        }
         void vscode.window.showInformationMessage(
           "RA3 Mod XML: no index available. Open a workspace that contains Data/Mod.xml.",
         );
         return;
       }
       const s = idx.stats;
+      const stale = idx.stale ? " (stale)" : "";
       void vscode.window.showInformationMessage(
         `RA3 Mod XML index\n` +
           `Project: ${s.projectDir}\n` +
           `Files: ${s.indexedFiles} (${s.parsedFiles} parsed, ${s.shallowScannedFiles} shallow-scanned, ${s.shallowCacheHits + s.recordsCacheHits} cache hits)\n` +
           `Assets: ${s.assetCount} (${s.manifestAssetCount} from ${s.manifestFiles} manifests)\n` +
           `Defines: ${s.defineCount} · Streams: ${s.streams} · Candidates: ${s.sourceCandidates}\n` +
-          `Indexed in ${(s.elapsedMs / 1000).toFixed(1)}s`,
+          `Phase: ${s.phase} · Complete: ${s.complete}${stale}\n` +
+          `Build #${ws.buildCount} (trigger: ${ws.lastTrigger})\n` +
+          `Indexed in ${(s.elapsedMs / 1000).toFixed(1)}s\n` +
+          `XML walk: ${(s.walkMs / 1000).toFixed(1)}s · Candidates: ${(s.candidatesMs / 1000).toFixed(1)}s · Art scan: ${(s.artScanMs / 1000).toFixed(1)}s`,
         { modal: false },
       );
     }),

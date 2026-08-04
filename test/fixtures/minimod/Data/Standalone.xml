@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+  <Includes>
+    <Include type="instance" source="Includes/StandaloneBase.xml" />
+  </Includes>
+  <Defines>
+    <Define name="STANDALONE_HEALTH" value="200.0" />
+  </Defines>
+  <GameObject id="StandaloneTank" inheritFrom="StandaloneBase">
+    <Draws>
+      <TruckDraw id="ModuleTag_Draw" />
+      <xi:include
+        href="DATA:Includes/HeadlightModules.xml"
+        xpointer="xmlns(n=uri:ea.com:eala:asset) xpointer(/n:HeadlightDraw2/child::*)" />
+    </Draws>
+    <BehaviorModules>
+      <ReconstituteStateSpecialAbility UpdateModuleId="ModuleTag_Headlight" />
+    </BehaviorModules>
+  </GameObject>
+</AssetDeclaration>

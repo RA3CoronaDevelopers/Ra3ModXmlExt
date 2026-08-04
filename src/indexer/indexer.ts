@@ -18,7 +18,6 @@ import {
   LineMap,
   parseXml,
   stripBom,
-  type XmlDocument,
   type XmlElement,
 } from "../language/xmlParser";
 import {
@@ -28,6 +27,11 @@ import {
   type ResolveResult,
   type SearchPaths,
 } from "./includeResolver";
+import {
+  buildExistenceSnapshot,
+  type ExistenceSnapshot,
+} from "./existence";
+import { findXPointerContainer, localName } from "./xpointer";
 import {
   deriveAssetId,
   deriveAssetType,
@@ -59,10 +63,11 @@ const MAX_DEPTH = 300;
 /** Files above this size are never parsed (safety against binary blobs). */
 const MAX_PARSE_BYTES = 4 * 1024 * 1024;
 /**
- * Fully parsed XML documents. `.xml` / `.manifestxml` files are small enough
- * that a full DOM is affordable.
+ * Fully parsed XML documents. `.xml` files are small enough that a full DOM
+ * is affordable. (Compiled manifests are binary `*.manifest` files parsed by
+ * `manifestParser`; there is no `.manifestxml` source format.)
  */
-const FULL_XML_EXTENSIONS = new Set([".xml", ".manifestxml"]);
+const FULL_XML_EXTENSIONS = new Set([".xml"]);
 /**
  * XML documents whose top-level structure is all the index needs (art-asset
  * files exported by modeling tools, e.g. .w3x). They are shallow-scanned so
@@ -79,6 +84,8 @@ export class ModIndexer {
   private docs: DocumentCache;
   private recordsCache: IndexRecordsCache;
   private resolveCache: IncludeResolveCache;
+  /** Directory-based file existence snapshot (avoids cold statSync storms). */
+  private existence: ExistenceSnapshot | null = null;
   private scanCounters = {
     shallowScannedFiles: 0,
     shallowCacheHits: 0,
@@ -86,7 +93,19 @@ export class ModIndexer {
     resolveCacheHits: 0,
     resolveCalls: 0,
   };
-  private phase = { candidatesMs: 0, walkMs: 0 };
+  private timings = { candidatesMs: 0, walkMs: 0, artScanMs: 0 };
+  /**
+   * Phase A ("xml") registers art-asset XML files (`.w3x` and sniffed XML)
+   * without reading their content; the queue is drained by phase B ("art"),
+   * which shallow-scans them and walks any includes they contain.
+   */
+  private deferArtScan = false;
+  private artQueue: {
+    path: string;
+    stream: StreamInfo;
+    depth: number;
+    viaInstance: boolean;
+  }[] = [];
   private assets = new Map<string, Map<string, AssetDef[]>>();
   private assetsById = new Map<string, AssetDef[]>();
   private defines = new Map<string, DefineDef[]>();
@@ -111,8 +130,7 @@ export class ModIndexer {
 
   /**
    * Returns a document for indexing/navigation:
-   * - `.xml` / `.manifestxml` files are fully parsed (bounded by
-   *   MAX_PARSE_BYTES);
+   * - `.xml` files are fully parsed (bounded by MAX_PARSE_BYTES);
    * - `.w3x` (and unknown-extension files whose content looks like XML) are
    *   shallow-scanned, so huge model files never become a DOM;
    * - everything else is registered as a file but never parsed.
@@ -120,7 +138,10 @@ export class ModIndexer {
    * Cached entries are reused when the file stat is unchanged, which lets a
    * workspace-owned cache survive rebuilds.
    */
-  async readDocument(path: string): Promise<ParsedFile | null> {
+  async readDocument(
+    path: string,
+    opts?: { deferArt?: boolean },
+  ): Promise<ParsedFile | null> {
     const key = normKey(path);
     const trust =
       this.opts.trustUnchanged === true && !this.opts.changedFiles?.has(key);
@@ -143,29 +164,71 @@ export class ModIndexer {
     try {
       const st = await stat(path);
       const rec = this.recordsCache.get(key);
-      if (rec?.stat && rec.stat.mtimeMs === st.mtimeMs && rec.stat.size === st.size) {
+      if (
+        rec?.stat &&
+        rec.stat.mtimeMs === st.mtimeMs &&
+        rec.stat.size === st.size &&
+        rec.stat.birthtimeMs === st.birthtimeMs &&
+        rec.stat.ctimeMs === st.ctimeMs
+      ) {
         return this.recordsParsed(path, rec);
       }
       const hit = this.docs.get(key);
       if (
         hit?.file.stat &&
         hit.file.stat.mtimeMs === st.mtimeMs &&
-        hit.file.stat.size === st.size
+        hit.file.stat.size === st.size &&
+        hit.file.stat.birthtimeMs === st.birthtimeMs &&
+        hit.file.stat.ctimeMs === st.ctimeMs
       ) {
         this.files.set(key, hit.file);
         return hit;
       }
       const mode = await this.detectXmlMode(path);
-      if (mode === "shallow") return this.scanShallow(path, st);
+      if (mode === "shallow") {
+        // Phase A: register the art file, defer the shallow scan to phase B.
+        if (opts?.deferArt) {
+          const file: IndexedFile = {
+            path: resolve(path),
+            stat: {
+              mtimeMs: st.mtimeMs,
+              size: st.size,
+              birthtimeMs: st.birthtimeMs,
+              ctimeMs: st.ctimeMs,
+            },
+          };
+          // Deliberately NOT stored in the DocumentCache: a deferred entry
+          // has no records, and a later phase-B read must re-scan it.
+          this.files.set(key, file);
+          return { file, parse: null, records: null, lineMap: null, deferredArt: true };
+        }
+        return this.scanShallow(path, st);
+      }
       if (mode === "binary") {
-        const file: IndexedFile = { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } };
+        const file: IndexedFile = {
+          path: resolve(path),
+          stat: {
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+            birthtimeMs: st.birthtimeMs,
+            ctimeMs: st.ctimeMs,
+          },
+        };
         const parsed: ParsedFile = { file, parse: null, records: null, lineMap: null };
         this.docs.set(parsed);
         this.files.set(key, file);
         return parsed;
       }
       if (st.size > MAX_PARSE_BYTES) {
-        const file: IndexedFile = { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } };
+        const file: IndexedFile = {
+          path: resolve(path),
+          stat: {
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+            birthtimeMs: st.birthtimeMs,
+            ctimeMs: st.ctimeMs,
+          },
+        };
         const parsed: ParsedFile = { file, parse: null, records: null, lineMap: null };
         this.docs.set(parsed);
         this.files.set(key, file);
@@ -176,7 +239,15 @@ export class ModIndexer {
       const parse = parseXml(text);
       const records = extractIndexRecords(parse, lineMap);
       const parsed: ParsedFile = {
-        file: { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } },
+        file: {
+          path: resolve(path),
+          stat: {
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+            birthtimeMs: st.birthtimeMs,
+            ctimeMs: st.ctimeMs,
+          },
+        },
         parse,
         records,
         lineMap,
@@ -211,7 +282,15 @@ export class ModIndexer {
       const lineMap = new LineMap(text);
       const records = recordsFromShallow(scanXmlShallow(text), lineMap);
       const parsed: ParsedFile = {
-        file: { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } },
+        file: {
+          path: resolve(path),
+          stat: {
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+            birthtimeMs: st.birthtimeMs,
+            ctimeMs: st.ctimeMs,
+          },
+        },
         parse: null,
         records,
         lineMap: null,
@@ -235,11 +314,11 @@ export class ModIndexer {
   }
 
   /**
-   * Reads a document and guarantees a DOM parse tree. Used only for
-   * root-level <xi:include> xpointer selection (rare), where the target's
-   * container children are needed.
+   * Reads a document and guarantees a DOM parse tree. Used for root-level
+   * <xi:include> xpointer selection (rare) and by the document-local scope
+   * (logical include expansion + precise definition locations).
    */
-  private async readDom(path: string): Promise<ParsedFile | null> {
+  async readDom(path: string): Promise<ParsedFile | null> {
     const key = normKey(path);
     const cached = this.docs.get(key);
     if (cached?.parse?.root) {
@@ -253,7 +332,9 @@ export class ModIndexer {
         hit?.parse?.root &&
         hit.file.stat &&
         hit.file.stat.mtimeMs === st.mtimeMs &&
-        hit.file.stat.size === st.size
+        hit.file.stat.size === st.size &&
+        hit.file.stat.birthtimeMs === st.birthtimeMs &&
+        hit.file.stat.ctimeMs === st.ctimeMs
       ) {
         this.files.set(key, hit.file);
         return hit;
@@ -264,7 +345,15 @@ export class ModIndexer {
       const parse = parseXml(text);
       const records = extractIndexRecords(parse, lineMap);
       const parsed: ParsedFile = {
-        file: { path: resolve(path), stat: { mtimeMs: st.mtimeMs, size: st.size } },
+        file: {
+          path: resolve(path),
+          stat: {
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+            birthtimeMs: st.birthtimeMs,
+            ctimeMs: st.ctimeMs,
+          },
+        },
         parse,
         records,
         lineMap,
@@ -299,7 +388,12 @@ export class ModIndexer {
       return hit;
     }
     this.scanCounters.resolveCalls++;
-    const result = resolveSource(source, currentDir, this.searchPaths);
+    const result = resolveSource(
+      source,
+      currentDir,
+      this.searchPaths,
+      this.existence ?? undefined,
+    );
     this.resolveCache.set(key, result);
     return result;
   }
@@ -323,14 +417,26 @@ export class ModIndexer {
     return this.docs.get(path);
   }
 
-  async build(): Promise<ModIndex> {
+  /** True when the file is part of the current build's index. */
+  isIndexedFile(path: string): boolean {
+    return this.files.has(normKey(path));
+  }
+
+  async build(onPhase?: (index: ModIndex) => void | Promise<void>): Promise<ModIndex> {
     const start = Date.now();
+    // Root list only; directories are listed lazily on first query, so the
+    // XML phase does not pay an upfront recursive enumeration of the SDK.
+    this.existence = buildExistenceSnapshot(this.searchPaths);
     const projectData = await findCaseInsensitiveDir(join(this.opts.projectDir, "Data"));
     const additionalMaps = projectData
       ? await findCaseInsensitiveDir(join(projectData, "additionalmaps"))
       : null;
 
     // ── Streams ──
+    // Phase A: walk the include graph without reading art-asset content.
+    // `.w3x` (and sniffed XML) files are registered and queued; their
+    // top-level assets and nested includes are processed in phase B.
+    this.deferArtScan = true;
     const walkStart = Date.now();
     const staticEntry = projectData ? join(projectData, "Mod.xml") : null;
     if (staticEntry) {
@@ -360,7 +466,7 @@ export class ModIndexer {
         await this.walk(entry, "all", stream, 0);
       }
     }
-    this.phase.walkMs = Date.now() - walkStart;
+    this.timings.walkMs = Date.now() - walkStart;
 
     // ── Source completion candidates ──
     const candidatesStart = Date.now();
@@ -408,45 +514,94 @@ export class ModIndexer {
       ...sdkRootCandidates,
       ...this.sourceCandidates,
     ]);
-    this.phase.candidatesMs = Date.now() - candidatesStart;
+    this.timings.candidatesMs = Date.now() - candidatesStart;
 
+    // Publish the XML phase as an immutable snapshot: features get usable
+    // completions/navigation/diagnostics for XML + manifest data immediately,
+    // while the slow art scan continues in the background.
+    const xmlPhase = this.snapshotIndex("xml", false, start);
+    if (onPhase) await onPhase(xmlPhase);
+
+    // ── Phase B: art assets ──
+    this.deferArtScan = false;
+    const artStart = Date.now();
+    while (this.artQueue.length) {
+      const entry = this.artQueue.shift()!;
+      const parsed = await this.readDocument(entry.path);
+      if (parsed?.records) {
+        await this.applyRecords(parsed, entry.stream, entry.depth, entry.viaInstance);
+      }
+    }
+    this.timings.artScanMs = Date.now() - artStart;
+
+    return this.snapshotIndex("art", true, start);
+  }
+
+  /**
+   * Produces a copy of the current index state. Phase-A snapshots must be
+   * immutable: phase B keeps mutating the live maps after the snapshot has
+   * been handed to features, so every nested map/array is cloned here.
+   */
+  private snapshotIndex(
+    phase: "xml" | "art",
+    complete: boolean,
+    startedAt: number,
+  ): ModIndex {
     const manifestAssetCount = [...this.manifests.values()].reduce(
       (sum, m) => sum + m.assets.length,
       0,
     );
+    const assets = new Map<string, Map<string, AssetDef[]>>();
+    for (const [type, byId] of this.assets) {
+      const copied = new Map<string, AssetDef[]>();
+      for (const [id, defs] of byId) copied.set(id, defs.slice());
+      assets.set(type, copied);
+    }
+    const assetsById = new Map<string, AssetDef[]>();
+    for (const [id, defs] of this.assetsById) assetsById.set(id, defs.slice());
+    const defines = new Map<string, DefineDef[]>();
+    for (const [name, defs] of this.defines) defines.set(name, defs.slice());
 
     return {
       projectDir: resolve(this.opts.projectDir),
       sdkDir: resolve(this.opts.sdkDir),
-      assets: this.assets,
-      assetsById: this.assetsById,
-      defines: this.defines,
-      files: this.files,
-      streams: this.streams,
-      manifests: this.manifests,
-      sourceCandidates: this.sourceCandidates,
-      diagnostics: this.diagnostics,
+      complete,
+      phase,
+      assets,
+      assetsById,
+      defines,
+      files: new Map(this.files),
+      streams: this.streams.map((s) => ({ ...s, files: new Set(s.files) })),
+      manifests: new Map(this.manifests),
+      sourceCandidates: this.sourceCandidates.slice(),
+      diagnostics: this.diagnostics.slice(),
       stats: {
         projectDir: resolve(this.opts.projectDir),
         sdkDir: resolve(this.opts.sdkDir),
+        phase,
+        complete,
         indexedFiles: this.files.size,
         parsedFiles: [...this.files.values()].filter(
           (f) => f.stat != null && f.stat.size <= MAX_PARSE_BYTES,
         ).length,
         shallowScannedFiles: this.scanCounters.shallowScannedFiles,
+        deferredArtFiles: this.artQueue.length,
         shallowCacheHits: this.scanCounters.shallowCacheHits,
         recordsCacheHits: this.scanCounters.recordsCacheHits,
         resolveCacheHits: this.scanCounters.resolveCacheHits,
         resolveCalls: this.scanCounters.resolveCalls,
-        candidatesMs: this.phase.candidatesMs,
-        walkMs: this.phase.walkMs,
+        snapshotHits: this.existence?.hits ?? 0,
+        snapshotFallbacks: this.existence?.fallbacks ?? 0,
+        candidatesMs: this.timings.candidatesMs,
+        walkMs: this.timings.walkMs,
+        artScanMs: this.timings.artScanMs,
         assetCount: [...this.assets.values()].reduce((sum, byId) => sum + byId.size, 0),
         defineCount: this.defines.size,
         manifestFiles: this.manifests.size,
         manifestAssetCount,
         streams: this.streams.length,
         sourceCandidates: this.sourceCandidates.length,
-        elapsedMs: Date.now() - start,
+        elapsedMs: Date.now() - startedAt,
       },
     };
   }
@@ -483,9 +638,19 @@ export class ModIndexer {
 
     // readDocument returns compact index records for every indexable XML
     // document (full parse or shallow scan), or a bare file registration
-    // for binary / unparseable targets.
-    const parsed = await this.readDocument(path);
+    // for binary / unparseable targets. During phase A, art-asset XML files
+    // are registered and queued instead of scanned (deferredArt).
+    const parsed = await this.readDocument(path, this.deferArtScan ? { deferArt: true } : undefined);
     if (!parsed) return;
+    if (parsed.deferredArt) {
+      this.artQueue.push({
+        path: parsed.file.path,
+        stream,
+        depth,
+        viaInstance: mode === "instance",
+      });
+      return;
+    }
     if (parsed.records) {
       await this.applyRecords(parsed, stream, depth, mode === "instance");
       return;
@@ -722,11 +887,6 @@ export class ModIndexer {
 
 // ── Module-level helpers ─────────────────────────────────────────────
 
-function localName(tag: string): string {
-  const idx = tag.lastIndexOf(":");
-  return idx >= 0 ? tag.slice(idx + 1) : tag;
-}
-
 function lineOf(parsed: ParsedFile, offset: number): number {
   if (!parsed.lineMap) return 0;
   return parsed.lineMap.positionAt(offset).line + 1;
@@ -772,15 +932,6 @@ async function findCaseInsensitiveDir(dir: string): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-function findXPointerContainer(doc: XmlDocument, xpointer: string): XmlElement | null {
-  // Supports the form used by the mods:
-  //   xmlns(n=uri:ea.com:eala:asset) xpointer(/n:ElementName/child::*)
-  const m = /xpointer\(\/\w+:(\w+)\/child::\*\)/.exec(xpointer);
-  if (!m) return null;
-  const name = m[1];
-  return doc.elements.find((el) => localName(el.name) === name) ?? null;
 }
 
 /** Keeps the first candidate for each case-insensitive source string. */

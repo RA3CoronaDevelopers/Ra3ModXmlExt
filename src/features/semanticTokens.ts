@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { parseXml } from "../language/xmlParser";
 import { buildSemanticTokenRanges } from "../language/semanticTokens";
+import type { ModWorkspace } from "../workspace";
 
 const TOKEN_TYPES = ["type", "property", "string"] as const;
 
@@ -20,10 +21,15 @@ export const RA3_SEMANTIC_TOKENS_LEGEND = new vscode.SemanticTokensLegend([
 export class Ra3SemanticTokensProvider
   implements vscode.DocumentSemanticTokensProvider
 {
+  constructor(private ws: ModWorkspace) {}
+
   async provideDocumentSemanticTokens(
     document: vscode.TextDocument,
     _token: vscode.CancellationToken,
   ): Promise<vscode.SemanticTokens> {
+    if (!this.ws.isRa3Workspace()) {
+      return new vscode.SemanticTokens(new Uint32Array(0));
+    }
     const text = document.getText();
     const doc = parseXml(text);
     if (doc.errors.length === 0) {

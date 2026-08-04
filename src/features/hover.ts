@@ -1,13 +1,19 @@
 import * as vscode from "vscode";
-import { findElementAt, parseXml } from "../language/xmlParser";
+import { findElementAt } from "../language/xmlParser";
 import { resolveElementType } from "../language/typeContext";
 import * as model from "../model/schemaModel";
 import type { ModWorkspace } from "../workspace";
-import type { ModIndex } from "../indexer/types";
 import {
+  isLocalReferenceAttribute,
   isReferenceAttributeOfType,
   resolveReferenceTargetsForType,
 } from "../indexer/refs";
+import {
+  findContainingGameObject,
+  findLocalId,
+  type LogicalElement,
+} from "../indexer/logicalTree";
+import { scopePathKey, type DocumentScope } from "../indexer/localScope";
 import { dirname } from "node:path";
 import { buildSearchPaths, resolveSource } from "../indexer/includeResolver";
 
@@ -19,9 +25,10 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     position: vscode.Position,
     _token: vscode.CancellationToken,
   ): Promise<vscode.Hover | null> {
-    const text = document.getText();
+    if (!this.ws.isRa3Workspace()) return null;
     const offset = document.offsetAt(position);
-    const doc = parseXml(text);
+    const scope = await this.ws.getScope(document);
+    const doc = scope.expanded;
     const el = findElementAt(doc, offset);
     if (!el) return null;
     const elType = resolveElementType(el);
@@ -35,7 +42,7 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     // Attribute value.
     for (const attr of el.attrs) {
       if (attr.hasValue && offset >= attr.valueStart && offset <= attr.valueEnd) {
-        return this.valueHover(el, elType, attr.name, attr.value, document, this.ws.index);
+        return this.valueHover(el, elType, attr.name, attr.value, document, scope);
       }
     }
     // Element name.
@@ -116,14 +123,17 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     attrName: string,
     value: string,
     document: vscode.TextDocument,
-    idx: ModIndex | null,
+    scope: DocumentScope,
   ): vscode.Hover | null {
+    const idx = scope.merged;
     const md = new vscode.MarkdownString();
 
     // $DEFINE reference.
     const defineMatch = /\$([A-Za-z_][A-Za-z0-9_]*)/.exec(value);
     if (defineMatch && idx) {
-      const defs = idx.defines.get(defineMatch[1].toLowerCase());
+      const defs =
+        idx.local?.defines.get(defineMatch[1].toLowerCase()) ??
+        idx.defines.get(defineMatch[1].toLowerCase());
       if (defs?.length) {
         const d = defs[0];
         md.appendMarkdown(`**Define** \`$${d.name}\`  \n`);
@@ -139,11 +149,14 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       (el.name === "Include" && attrName === "source") ||
       (el.name === "xi:include" && attrName === "href")
     ) {
-      const resolved = idx
+      const searchPaths = idx
+        ? buildSearchPaths(idx.sdkDir, idx.projectDir)
+        : this.ws.searchPaths();
+      const resolved = searchPaths
         ? resolveSource(
             value,
             dirname(document.uri.fsPath),
-            buildSearchPaths(idx.sdkDir, idx.projectDir),
+            searchPaths,
           ).path
         : null;
       if (resolved) {
@@ -161,8 +174,26 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       return new vscode.Hover(md);
     }
 
+    // Pipeline-local (Poid) references: resolve inside the enclosing
+    // GameObject's logical subtree (including xi:include targets).
+    if (
+      isLocalReferenceAttribute(elType, attrName) &&
+      attrName.toLowerCase() !== "id"
+    ) {
+      return this.localIdHover(scope, el as LogicalElement, value, document);
+    }
+
     // Asset reference / inheritFrom.
-    if (idx) {
+    if (!idx) {
+      if (isReferenceAttributeOfType(elType, attrName)) {
+        md.appendMarkdown(
+          "Index is still building — references cannot be resolved yet.",
+        );
+        return new vscode.Hover(md);
+      }
+      return null;
+    }
+    {
       if (!isReferenceAttributeOfType(elType, attrName)) return null;
       const targets = resolveReferenceTargetsForType(idx, elType, attrName, value);
       if (targets.length) {
@@ -191,8 +222,28 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       );
       return new vscode.Hover(md);
     }
+  }
 
-    return null;
+  private localIdHover(
+    scope: DocumentScope,
+    el: LogicalElement,
+    value: string,
+    document: vscode.TextDocument,
+  ): vscode.Hover | null {
+    const root = findContainingGameObject(el);
+    if (!root) return null;
+    const target = findLocalId(root, value);
+    if (!target) return null;
+    const idAttr = target.attrs.find((a) => a.name === "id");
+    if (!idAttr?.hasValue) return null;
+    const lineMap = scope.lineMaps.get(scopePathKey(target.sourceFile));
+    const line = lineMap ? lineMap.positionAt(idAttr.valueStart).line + 1 : 0;
+    const md = new vscode.MarkdownString();
+    md.appendMarkdown(`**Local pipeline id** \`${value}\`  \n`);
+    md.appendCodeblock(`<${target.name}>`);
+    const rel = relativePath(document, target.sourceFile);
+    md.appendMarkdown(`Defined in \`${rel}:${line}\``);
+    return new vscode.Hover(md);
   }
 }
 

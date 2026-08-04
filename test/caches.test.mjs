@@ -4,11 +4,15 @@ import {
   DocumentCache,
   IncludeResolveCache,
   IndexRecordsCache,
+  InvalidationsEpoch,
 } from "../out/indexer/caches.js";
+import { resolve } from "node:path";
+
+const stat = { mtimeMs: 1, size: 1, birthtimeMs: 1, ctimeMs: 1 };
 
 function parsed(path, elements) {
   return {
-    file: { path, stat: { mtimeMs: 1, size: 1 } },
+    file: { path, stat },
     parse: { root: { name: "r" }, elements: new Array(elements), errors: [] },
     records: null,
     lineMap: null,
@@ -47,7 +51,7 @@ test("DocumentCache invalidate frees budget", () => {
 test("IndexRecordsCache stores and invalidates entries", () => {
   const cache = new IndexRecordsCache();
   const entry = {
-    stat: { mtimeMs: 1, size: 1 },
+    stat,
     records: { assets: [], defines: [], includes: [], rootXiIncludes: [], nestedXiIncludes: [] },
     kind: "full",
   };
@@ -55,6 +59,20 @@ test("IndexRecordsCache stores and invalidates entries", () => {
   assert.equal(cache.get("a.xml"), entry);
   cache.invalidate("a.xml");
   assert.equal(cache.get("a.xml"), undefined);
+});
+
+test("IndexRecordsCache exposes entries for disk persistence", () => {
+  const cache = new IndexRecordsCache();
+  const entry = {
+    stat,
+    records: { assets: [], defines: [], includes: [], rootXiIncludes: [], nestedXiIncludes: [] },
+    kind: "full",
+  };
+  cache.set("a.xml", entry);
+  const list = [...cache.entries()];
+  assert.equal(list.length, 1);
+  assert.equal(list[0][0], resolve("a.xml").toLowerCase());
+  assert.equal(list[0][1], entry);
 });
 
 test("IncludeResolveCache stores sources and manifest lookups", () => {
@@ -70,4 +88,16 @@ test("IncludeResolveCache stores sources and manifest lookups", () => {
   cache.clear();
   assert.equal(cache.get(key), undefined);
   assert.equal(cache.getManifest("static.xml"), undefined);
+});
+
+test("InvalidationsEpoch tracks changes since a snapshot", () => {
+  const epoch = new InvalidationsEpoch();
+  const before = epoch.snapshot();
+  assert.equal(epoch.changedSince(before), false);
+  epoch.mark();
+  assert.equal(epoch.changedSince(before), true);
+  assert.equal(epoch.changedSince(epoch.snapshot()), false);
+  epoch.mark();
+  epoch.mark();
+  assert.equal(epoch.current, 3);
 });

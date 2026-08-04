@@ -79,7 +79,7 @@ test("provides include source candidates", async () => {
   assert.ok(xml.some((c) => c.source === "DATA:static.xml"));
 });
 
-test("indexes art-asset XML (.w3x / sniffed .w3d) via shallow scan and skips binary", async () => {
+test("indexes art-asset XML (.w3x / sniffed unknown extension) via shallow scan and skips binary", async () => {
   const idx = await buildIndex();
 
   // The .w3x hub chain: Mod.xml -> VehicleArt.xml -> Models/Tank_SKN.w3x.
@@ -96,7 +96,7 @@ test("indexes art-asset XML (.w3x / sniffed .w3d) via shallow scan and skips bin
   // Unknown extension with XML content is sniffed and indexed.
   assert.ok(
     idx.assetsById.get("tank_fp")?.some((d) => d.type === "W3DMesh"),
-    "unknown-extension XML (.w3d) sniffed and indexed",
+    "unknown-extension XML (.dat) sniffed and indexed",
   );
 
   // Binary content is registered as a file but never parsed.
@@ -130,6 +130,107 @@ test("w3x files appear in Include source completion candidates", async () => {
   assert.ok(
     idx.sourceCandidates.some((c) => c.source === "DATA:Includes/Models/Tank_SKN.w3x"),
     "DATA: w3x candidate",
+  );
+});
+
+test("build publishes an immutable XML phase before art scanning", async () => {
+  let phaseA;
+  const indexer = new ModIndexer({
+    projectDir: project,
+    sdkDir: sdk,
+    builtmodsDirs: [join(sdk, "builtmods")],
+    indexSageXml: true,
+    additionalDataSearchPaths: [],
+    walker: new CachedDirectoryWalker(),
+  });
+  const idx = await indexer.build((p) => {
+    phaseA = p;
+  });
+
+  assert.ok(phaseA, "phase-A snapshot published");
+  assert.equal(phaseA.complete, false);
+  assert.equal(phaseA.phase, "xml");
+  assert.ok(phaseA.assetsById.has("testtank"), "XML assets available in phase A");
+  assert.ok(
+    phaseA.assetsById.has("vanillatank"),
+    "manifest assets available in phase A",
+  );
+  assert.equal(
+    phaseA.assetsById.has("tank_skn"),
+    false,
+    "art assets deferred in phase A",
+  );
+  assert.ok(phaseA.stats.deferredArtFiles >= 2, "deferred art queue recorded");
+  assert.equal(phaseA.stats.shallowScannedFiles, 0, "no art scanned during phase A");
+
+  assert.equal(idx.complete, true);
+  assert.equal(idx.phase, "art");
+  assert.ok(idx.assetsById.has("tank_skn"), "art assets present in the final index");
+  assert.equal(
+    phaseA.assetsById.has("tank_skn"),
+    false,
+    "phase-A snapshot is immutable (phase B did not mutate it)",
+  );
+  assert.equal(typeof idx.stats.artScanMs, "number");
+  assert.equal(
+    indexer.isIndexedFile(join(project, "Data", "Mod.xml")),
+    true,
+    "indexed files are recognized",
+  );
+  assert.equal(
+    indexer.isIndexedFile(join(project, "Data", "NotIndexed.xml")),
+    false,
+    "unrelated files are not recognized",
+  );
+});
+
+test("stat validation re-reads a file whose mtime changed", async (t) => {
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), "ra3modxml-mtime-"));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const projectDir = join(tmp, "project");
+  fs.mkdirSync(join(projectDir, "Data"), { recursive: true });
+  const modPath = join(projectDir, "Data", "Mod.xml");
+  fs.writeFileSync(
+    modPath,
+    `<?xml version="1.0"?>\n<AssetDeclaration>\n  <GameObject id="TankA"/>\n</AssetDeclaration>\n`,
+    "utf8",
+  );
+
+  const documentCache = new DocumentCache();
+  const recordsCache = new IndexRecordsCache();
+  const resolveCache = new IncludeResolveCache();
+  const make = () =>
+    new ModIndexer({
+      projectDir,
+      sdkDir: sdk,
+      builtmodsDirs: [join(sdk, "builtmods")],
+      indexSageXml: false,
+      additionalDataSearchPaths: [],
+      walker: new CachedDirectoryWalker(),
+      documentCache,
+      recordsCache,
+      resolveCache,
+      trustUnchanged: false,
+    });
+
+  const first = await make().build();
+  assert.ok(first.assetsById.has("tanka"));
+  assert.equal(first.stats.recordsCacheHits, 0);
+
+  const past = new Date(Date.now() - 60000);
+  fs.utimesSync(modPath, past, past);
+  const second = await make().build();
+  assert.equal(
+    second.stats.recordsCacheHits,
+    0,
+    "mtime change invalidates the cached records",
+  );
+  assert.ok(second.assetsById.has("tanka"));
+
+  const third = await make().build();
+  assert.ok(
+    third.stats.recordsCacheHits > 0,
+    "unchanged files are served from the records cache",
   );
 });
 
@@ -218,6 +319,8 @@ test("index stats include candidate/walk phase timings", async () => {
   const idx = await buildIndex();
   assert.equal(typeof idx.stats.candidatesMs, "number");
   assert.equal(typeof idx.stats.walkMs, "number");
+  assert.ok(idx.stats.snapshotHits > 0, "existence snapshot answered lookups");
+  assert.equal(typeof idx.stats.snapshotFallbacks, "number");
 });
 
 test("w3x with a UTF-8 BOM is indexed with correct offsets", async (t) => {

@@ -16,6 +16,12 @@
     - `<Include source>` 补全可解析的 `DATA:` / `ART:` / `AUDIO:` 与项目相对路径。
 - **悬停提示**：元素/属性显示 XSD 文档、类型、必填/默认值；引用值显示定义位置；`$DEFINE` 显示值与定义位置；`Include source` / `xi:include href` 显示解析后的目标文件；`xi:include` 元素与属性给出 XInclude 说明。
 - **引用导航**：从引用值（`CommandSet="..."`、`Weapon="..."`、`inheritFrom`）跳转到定义（严格按引用类型过滤，候选由 `ra3modxml.definitionMode` 控制：`all` 列出 mod + 原版、`project-only` 优先项目内定义）；`Ctrl+点击` Include / `xi:include href` 打开目标文件；Find All References 搜索整个工作区；文档大纲列出顶层资产与 `$DEFINE`。
+- **当前文档局部作用域（T1）**：即使一个文件不在任何全局流里（没有从
+  `Data/Mod.xml` / `additionalmaps` 可达），插件也会按当前文件自身的资产、
+  `$DEFINE` 及其 include 链建立局部索引。`xi:include` 会在逻辑树中展开，
+  使 include 进来的内容获得正确的父上下文；`AttachModuleId` / `ModuleId` /
+  `AutoResolveBody` 等管线局部（Poid）引用可以补全、悬停与跳转到同一
+  GameObject 内的模块（含通过 `xi:include` 拼入的兄弟模块）。
 - **错误检查**：XML 格式错误、未知元素/属性（`xi:` 等外来命名空间不误报）、顶层资产缺 `id`、重复 ID、未解析引用（含类型不匹配）、Include / 嵌套 `xi:include` 目标找不到、`$DEFINE` 未定义。
 - **manifest 支持**：`<Include type="reference">` 指向的 `static/global/audio.manifest`（SDK `builtmods`）会被解析，manifest 中的原版资产 ID 可用于补全/悬停/导航/诊断。
 - **美术资产（`.w3x`）**：`W3X.xml` / `ART:` include 链中的 `.w3x` 模型文件会被
@@ -23,14 +29,24 @@
   `Model@Name`、`Hierarchy`、`Mesh` 等引用可以解析、悬停与跳转。超大模型
   （几十 MB 的顶点/三角形数据）采用浅扫描——只提取顶层资产记录、不建 DOM 树，
   结果在 workspace 级缓存并跨重建复用，保存文件触发的重建不会重读未变化的模型文件。
+- **索引分阶段与部分可用性**：先建立 XML + manifest 索引（首建早期即可用），
+  w3x 美术资产随后台扫描补齐。索引完成前，语法/模型诊断、枚举与子元素补全、
+  Include 跳转/悬停照常工作；引用类诊断会“显示但标注”
+  （`unresolved-reference-indexing` + `(index incomplete)` 说明），不会把
+  未完成的索引误当成最终结论。
 - **大项目性能**：索引记录（资产 / Define / Include / 行号）与 include 解析结果
   跨重建缓存，保存触发的重建零 stat、零重读（Corona 实测约 2 秒）；DOM 树只按需
-  保留并设元素预算，避免内存膨胀。
+  保留并设元素预算，避免内存膨胀。编辑器外的文件改动（git pull、导出工具）会
+  触发防抖重建；构建期间文件再次被修改时，已发布索引会标记 `(stale)` 并自动重跑。
+  include 路径解析使用目录枚举建立的文件集快照（无 statSync 风暴）；records
+  缓存会持久化到磁盘（gzip + 多信号 stat 校验 + 原子写），重启 VS Code 后冷启动
+  只需秒级校验，Corona 实测约 11 秒（首次全量约 2 分钟）。
 
 ## 使用
 
 1. 用 VS Code 打开 RA3 Mod 项目文件夹（含 `Data/Mod.xml` 或 `mod.babproj`）。
-2. 插件自动激活并开始后台索引（状态栏显示资产数量）。
+2. 插件自动激活并开始后台索引（状态栏显示阶段与资产数量；扩展也会在打开
+   任意 XML 文件时激活，非 RA3 工作区不会显示 RA3 专属功能）。
 3. 编辑任意 `*.xml` 即可获得补全、跳转与诊断。
 
 ### 设置（`settings.json`）
@@ -48,6 +64,8 @@
 
 - `RA3 Mod XML: Re-index workspace`：手动重建索引。
 - `RA3 Mod XML: Show index report`：查看索引统计。
+- `RA3 Mod XML: Clear caches and rebuild`：清空内存/磁盘缓存并强制全量重建。
+- `RA3 Mod XML: Show cache report`：查看磁盘缓存路径、大小、校验统计与命中数。
 
 ## 开发
 
@@ -77,14 +95,19 @@ src/
     schemaModel.ts        XSD 模型运行时（schema-model.json / asset-types.json 由 tools 生成）
   indexer/
     includeResolver.ts    Include 路径解析（纯 TS，移植 check_duplicate_ids.py）
+    existence.ts          文件集存在性快照（目录枚举 Set，替代逐路径 statSync）
     manifestParser.ts     .manifest 二进制解析（移植 OpenSAGE ManifestFile.cs）
     fileScanner.ts        目录扫描与 Include source 候选
     refs.ts               引用目标解析（按引用类型过滤）
+    xpointer.ts           xi:include xpointer 子集解析（纯 TS）
+    logicalTree.ts        当前文档逻辑树（xi:include 拼接、局部作用域）
+    localScope.ts         文档局部索引 overlay（自身链 + include 链）
     shallowScan.ts        .w3x 等大体积美术资产顶层浅扫描（纯 TS，不建 DOM）
     records.ts            每文件紧凑索引记录（资产/Define/Include/xi + 行号）
     caches.ts             跨重建持久缓存（DocumentCache / IndexRecordsCache /
-                          IncludeResolveCache）
-    indexer.ts            工作区索引器（后台、缓存、记录驱动重建）
+                          IncludeResolveCache）+ 失效纪元 InvalidationsEpoch
+    diskCache.ts          跨会话磁盘缓存（gzip JSON、原子写、多信号 stat 校验）
+    indexer.ts            工作区索引器（后台、缓存、记录驱动重建、分阶段发布）
   features/               completion / hover / navigation / diagnostics / semanticTokens
 syntaxes/                 TextMate 注入语法
 tools/                    XSD → 模型、AssetType 枚举提取

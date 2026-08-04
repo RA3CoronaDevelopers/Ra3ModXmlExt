@@ -7,7 +7,16 @@ import {
   resolveSource,
   type SearchPaths,
 } from "../indexer/includeResolver";
-import { resolveReferenceTargetsForType } from "../indexer/refs";
+import {
+  isLocalReferenceAttribute,
+  resolveReferenceTargetsForType,
+} from "../indexer/refs";
+import {
+  findContainingGameObject,
+  findLocalId,
+  type LogicalElement,
+} from "../indexer/logicalTree";
+import { scopePathKey, type DocumentScope } from "../indexer/localScope";
 import type { ModWorkspace } from "../workspace";
 import type { AssetDef, ModIndex } from "../indexer/types";
 
@@ -25,11 +34,11 @@ export class Ra3DefinitionProvider implements vscode.DefinitionProvider {
     position: vscode.Position,
     _token: vscode.CancellationToken,
   ): Promise<vscode.Location | vscode.Location[] | null> {
-    const idx = this.ws.index;
-    if (!idx) return null;
-    const text = document.getText();
+    if (!this.ws.isRa3Workspace()) return null;
+    const scope = await this.ws.getScope(document);
+    const idx = scope.merged;
     const offset = document.offsetAt(position);
-    const doc = parseXml(text);
+    const doc = scope.expanded;
     const el = findElementAt(doc, offset);
     if (!el) return null;
     const elType = resolveElementType(el);
@@ -46,17 +55,31 @@ export class Ra3DefinitionProvider implements vscode.DefinitionProvider {
       (el.name === "Include" && nameLower === "source") ||
       (el.name === "include" && nameLower === "href")
     ) {
-      const resolved =
-        resolveSource(value, dirname(document.uri.fsPath), searchPathsFor(idx)).path ??
-        idx.sourceCandidates.find((c) => c.source === value)?.path ??
-        null;
-      return resolved
-        ? new vscode.Location(vscode.Uri.file(resolved), new vscode.Position(0, 0))
+      const searchPaths = idx ? searchPathsFor(idx) : this.ws.searchPaths();
+      const resolved = searchPaths
+        ? resolveSource(value, dirname(document.uri.fsPath), searchPaths).path
+        : null;
+      const fallback = idx?.sourceCandidates.find((c) => c.source === value)?.path;
+      const target = resolved ?? fallback ?? null;
+      return target
+        ? new vscode.Location(vscode.Uri.file(target), new vscode.Position(0, 0))
         : null;
     }
 
     // Asset reference / inheritFrom (filtered by the attribute's ref type).
+    if (!idx) return null;
     if (value && !value.startsWith("$")) {
+      if (
+        isLocalReferenceAttribute(elType, attr.name) &&
+        nameLower !== "id"
+      ) {
+        const local = this.localIdLocation(
+          scope,
+          el as LogicalElement,
+          value,
+        );
+        if (local) return local;
+      }
       let targets = resolveReferenceTargetsForType(idx, elType, attr.name, value);
       if (!targets.length) return null;
       if (
@@ -67,12 +90,39 @@ export class Ra3DefinitionProvider implements vscode.DefinitionProvider {
       }
       const locations: vscode.Location[] = [];
       for (const { def } of targets.slice(0, 8)) {
-        const loc = await assetDefLocation(this.ws, def, idx);
+        const loc = await assetDefLocation(this.ws, def, idx, scope, document);
         if (loc) locations.push(loc);
       }
       return locations.length ? locations : null;
     }
     return null;
+  }
+
+  private localIdLocation(
+    scope: DocumentScope,
+    el: LogicalElement,
+    value: string,
+  ): vscode.Location | null {
+    const root = findContainingGameObject(el);
+    if (!root) return null;
+    const target = findLocalId(root, value);
+    if (!target) return null;
+    const idAttr = target.attrs.find((a) => a.name === "id");
+    if (!idAttr?.hasValue) return null;
+    const lineMap = scope.lineMaps.get(scopePathKey(target.sourceFile));
+    if (!lineMap) {
+      return new vscode.Location(
+        vscode.Uri.file(target.sourceFile),
+        new vscode.Position(0, 0),
+      );
+    }
+    return new vscode.Location(
+      vscode.Uri.file(target.sourceFile),
+      new vscode.Range(
+        toVscodePosition(lineMap.positionAt(idAttr.valueStart)),
+        toVscodePosition(lineMap.positionAt(idAttr.valueEnd)),
+      ),
+    );
   }
 }
 
@@ -85,6 +135,8 @@ async function assetDefLocation(
   ws: ModWorkspace,
   def: AssetDef,
   idx: ModIndex,
+  scope: DocumentScope,
+  currentDocument: vscode.TextDocument,
 ): Promise<vscode.Location | null> {
   if (def.origin === "manifest") {
     const src = def.manifestSource;
@@ -100,12 +152,47 @@ async function assetDefLocation(
     return null;
   }
 
+  if (scopePathKey(def.file) === scopePathKey(currentDocument.uri.fsPath)) {
+    const precise = locationInCurrentDocument(scope, def.id, currentDocument);
+    if (precise) return precise;
+  }
+
   return (
     (await locationInDocument(ws, def.file, def.id)) ??
     new vscode.Location(
       vscode.Uri.file(def.file),
       new vscode.Position(Math.max(0, def.line - 1), 0),
     )
+  );
+}
+
+function locationInCurrentDocument(
+  scope: DocumentScope,
+  id: string,
+  document: vscode.TextDocument,
+): vscode.Location | null {
+  const el = scope.parse.elements.find((e) =>
+    e.attrs.some(
+      (a) => a.name === "id" && a.value.toLowerCase() === id.toLowerCase(),
+    ),
+  );
+  if (!el) return null;
+  const idAttr = el.attrs.find((a) => a.name === "id");
+  if (idAttr?.hasValue) {
+    return new vscode.Location(
+      document.uri,
+      new vscode.Range(
+        document.positionAt(idAttr.valueStart),
+        document.positionAt(idAttr.valueEnd),
+      ),
+    );
+  }
+  return new vscode.Location(
+    document.uri,
+    new vscode.Range(
+      document.positionAt(el.start),
+      document.positionAt(el.startTagEnd),
+    ),
   );
 }
 
@@ -118,7 +205,9 @@ async function locationInDocument(
   file: string,
   id: string,
 ): Promise<vscode.Location | null> {
-  const parsed = await ws.indexer?.readDocument(file);
+  // readDom (not readDocument) guarantees a DOM even when the compact
+  // records cache already has an entry for the file.
+  const parsed = await ws.indexer?.readDom(file);
   if (parsed?.parse && parsed.lineMap) {
     const el = parsed.parse.elements.find(
       (e) =>
@@ -156,12 +245,15 @@ function toVscodePosition(p: { line: number; character: number }): vscode.Positi
 // ── Find all references ─────────────────────────────────────────────
 
 export class Ra3ReferenceProvider implements vscode.ReferenceProvider {
+  constructor(private ws: ModWorkspace) {}
+
   async provideReferences(
     document: vscode.TextDocument,
     position: vscode.Position,
     _context: vscode.ReferenceContext,
     _token: vscode.CancellationToken,
   ): Promise<vscode.Location[] | null> {
+    if (!this.ws.isRa3Workspace()) return null;
     const text = document.getText();
     const offset = document.offsetAt(position);
     const doc = parseXml(text);
@@ -201,8 +293,10 @@ export class Ra3DocumentLinkProvider implements vscode.DocumentLinkProvider {
     document: vscode.TextDocument,
     _token: vscode.CancellationToken,
   ): Promise<vscode.DocumentLink[]> {
+    if (!this.ws.isRa3Workspace()) return [];
     const idx = this.ws.index;
-    if (!idx) return [];
+    const searchPaths = idx ? searchPathsFor(idx) : this.ws.searchPaths();
+    if (!searchPaths) return [];
     const text = document.getText();
     const doc = parseXml(text);
     const links: vscode.DocumentLink[] = [];
@@ -214,9 +308,9 @@ export class Ra3DocumentLinkProvider implements vscode.DocumentLinkProvider {
         resolveSource(
           srcAttr.value,
           dirname(document.uri.fsPath),
-          searchPathsFor(idx),
+          searchPaths,
         ).path ??
-        idx.sourceCandidates.find((c) => c.source === srcAttr.value)?.path ??
+        idx?.sourceCandidates.find((c) => c.source === srcAttr.value)?.path ??
         null;
       if (!target) continue;
       links.push(
@@ -236,10 +330,13 @@ export class Ra3DocumentLinkProvider implements vscode.DocumentLinkProvider {
 // ── Document symbols (outline) ──────────────────────────────────────
 
 export class Ra3DocumentSymbolProvider implements vscode.DocumentSymbolProvider {
+  constructor(private ws: ModWorkspace) {}
+
   async provideDocumentSymbols(
     document: vscode.TextDocument,
     _token: vscode.CancellationToken,
   ): Promise<vscode.DocumentSymbol[]> {
+    if (!this.ws.isRa3Workspace()) return [];
     const text = document.getText();
     const doc = parseXml(text);
     const root = doc.root;

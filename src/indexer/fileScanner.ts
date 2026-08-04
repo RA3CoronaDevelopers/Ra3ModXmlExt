@@ -62,6 +62,38 @@ export class CachedDirectoryWalker implements FileWalker {
 }
 
 /**
+ * True for paths whose changes can never affect the index: `.git` internals
+ * touched by background fetch/maintenance, and transient temp/backup files
+ * created by editors or other extensions (`UnitCrate.xml.git`, `*.tmp`,
+ * `*.lock`, `file~`, `.#file`, ...). Such events are ignored by the file
+ * watcher instead of triggering rebuilds.
+ */
+export function isWatcherNoisePath(fsPath: string): boolean {
+  const segments = fsPath.split(/[\\/]/);
+  if (segments.some((seg) => seg.toLowerCase() === ".git")) return true;
+  const base = segments[segments.length - 1] ?? "";
+  const lower = base.toLowerCase();
+  const noiseSuffixes = [".git", ".tmp", ".lock", "~", ".swp", ".bak", ".orig"];
+  if (noiseSuffixes.some((suffix) => lower.endsWith(suffix))) return true;
+  return lower.startsWith(".#") || lower.startsWith(".~");
+}
+
+/**
+ * True for files whose *content* participates in the index: XML documents
+ * and art-asset XML (.w3x). Reasonable text formats in RA3 mods are `.xml`,
+ * `.w3x` and `.lua`; lua is not indexed yet, and compiled manifests are
+ * binary `*.manifest` (there is no `.manifestxml` source format). Files
+ * already in the index with other extensions (e.g. sniffed XML) are handled
+ * separately via `ModIndexer.isIndexedFile`. Content changes to binary art
+ * (e.g. textures, `.w3d`) cannot change index records, so they do not need
+ * to trigger a rebuild.
+ */
+export function isContentRelevantPath(fsPath: string): boolean {
+  const ext = extname(fsPath).toLowerCase();
+  return ext === ".xml" || ext === ".w3x";
+}
+
+/**
  * Builds the candidate list for Include/@source completion from a set of
  * search directories. For DATA directories only *.xml files are listed; for
  * ART/AUDIO directories every file is listed (includes commonly point at

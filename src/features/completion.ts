@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { parseXml, type XmlElement } from "../language/xmlParser";
+import type { XmlElement } from "../language/xmlParser";
 import {
   analyzeContext,
   splitListValuePrefix,
@@ -8,6 +8,11 @@ import {
 import { resolveElementType } from "../language/typeContext";
 import * as model from "../model/schemaModel";
 import { isLocalReferenceAttribute } from "../indexer/refs";
+import {
+  findContainingGameObject,
+  collectLocalIds,
+  type LogicalElement,
+} from "../indexer/logicalTree";
 import type { ModWorkspace } from "../workspace";
 import type { ModIndex, AssetDef } from "../indexer/types";
 
@@ -21,11 +26,13 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     position: vscode.Position,
     _token: vscode.CancellationToken,
   ): Promise<vscode.CompletionItem[]> {
+    if (!this.ws.isRa3Workspace()) return [];
     const text = document.getText();
     const offset = document.offsetAt(position);
-    const doc = parseXml(text);
+    const scope = await this.ws.getScope(document);
+    const doc = scope.expanded;
     const ctx = analyzeContext(doc, text, offset);
-    const idx = this.ws.index;
+    const idx = scope.merged;
 
     switch (ctx.kind) {
       case "element-name":
@@ -33,9 +40,9 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       case "attribute-name":
         return this.attributeNameItems(ctx, document, position);
       case "attribute-value":
-        return idx ? this.valueItems(ctx, document, position, idx) : [];
+        return this.valueItems(ctx, document, position, idx);
       case "content":
-        return idx ? this.contentItems(ctx, document, position, idx) : [];
+        return this.contentItems(ctx, document, position, idx);
       default:
         return [];
     }
@@ -177,7 +184,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     ctx: CompletionContext,
     document: vscode.TextDocument,
     position: vscode.Position,
-    idx: ModIndex,
+    idx: ModIndex | null,
   ): vscode.CompletionItem[] {
     const el = ctx.element;
     const attr = ctx.attr;
@@ -232,6 +239,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       );
     }
     if (isInclude && attrName === "source") {
+      if (!idx) return [];
       return this.includeSourceItems(idx, prefix, make);
     }
     if (attrName === "xai:joinaction" || attrName === "joinaction") {
@@ -242,16 +250,19 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
 
     // inheritFrom: same element type first, then everything.
     if (attrName === "inheritfrom") {
+      if (!idx) return [];
       return this.assetIdItems(idx, el.name, null, prefix, make);
     }
 
     // `id` attributes are definitions and Poid attributes are pipeline-local
     // references; offering global asset ids for them would be wrong.
     if (attrInfo && isLocalReferenceAttribute(elType, attr.name)) {
-      return [];
+      if (attrName === "id") return [];
+      return this.localIdItems(el as LogicalElement, prefix, make);
     }
 
     if (attrInfo?.refType) {
+      if (!idx) return [];
       return this.assetIdItems(idx, null, attrInfo.refType, prefix, make);
     }
     if (attrInfo?.enumValues?.length) {
@@ -264,7 +275,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         .filter((v) => v.startsWith(prefix.toLowerCase()))
         .map((v) => make(v, vscode.CompletionItemKind.Value, "boolean"));
     }
-    if (attrInfo?.allowsDefine) {
+    if (idx && attrInfo?.allowsDefine) {
       return this.defineItems(idx, prefix, make);
     }
     return [];
@@ -304,8 +315,12 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
   ): vscode.CompletionItem[] {
     const lower = prefix.toLowerCase();
     const scored: { def: AssetDef; score: number }[] = [];
+    const seen = new Set<string>();
 
     const consider = (def: AssetDef) => {
+      const key = `${def.type}:${def.id.toLowerCase()}:${def.file}:${def.line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
       if (!def.id.toLowerCase().startsWith(lower)) return;
       let score = 3;
       if (refType && model.isAssignableTo(def.type, refType)) score = 1;
@@ -315,6 +330,18 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     };
 
     const targetType = selfType ?? refType;
+    const localAssets = idx.local?.assets;
+    const localById = idx.local?.assetsById;
+    if (localAssets || localById) {
+      if (!targetType) {
+        for (const list of localById!.values()) for (const d of list) consider(d);
+      } else {
+        for (const [typeName, byId] of localAssets!) {
+          if (!model.isAssignableTo(typeName, targetType)) continue;
+          for (const list of byId.values()) for (const d of list) consider(d);
+        }
+      }
+    }
     if (!targetType) {
       for (const list of idx.assetsById.values()) for (const d of list) consider(d);
     } else {
@@ -343,15 +370,45 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
   ): vscode.CompletionItem[] {
     const lower = prefix.replace(/^[=$]*/, "").toLowerCase();
     const items: vscode.CompletionItem[] = [];
-    for (const [key, defs] of idx.defines) {
-      if (!key.includes(lower)) continue;
-      const def = defs[0];
-      const label = `$${def.name}`;
-      const item = make(label, vscode.CompletionItemKind.Constant, "Define", def.value);
-      item.insertText = label;
-      items.push(item);
+    const seen = new Set<string>();
+    for (const defines of [idx.local?.defines, idx.defines]) {
+      if (!defines) continue;
+      for (const [key, defs] of defines) {
+        if (!key.includes(lower)) continue;
+        const def = defs[0];
+        const dedupe = `${def.name.toLowerCase()}:${def.file}:${def.line}`;
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        const label = `$${def.name}`;
+        const item = make(label, vscode.CompletionItemKind.Constant, "Define", def.value);
+        item.insertText = label;
+        items.push(item);
+      }
     }
     return items.slice(0, MAX_VALUE_ITEMS);
+  }
+
+  private localIdItems(
+    el: LogicalElement,
+    prefix: string,
+    make: (label: string, kind: vscode.CompletionItemKind, detail: string, doc?: string) => vscode.CompletionItem,
+  ): vscode.CompletionItem[] {
+    const root = findContainingGameObject(el);
+    if (!root) return [];
+    const lower = prefix.toLowerCase();
+    const items: vscode.CompletionItem[] = [];
+    for (const { id } of collectLocalIds(root)) {
+      if (!id.toLowerCase().startsWith(lower)) continue;
+      items.push(
+        make(
+          id,
+          vscode.CompletionItemKind.Value,
+          "local module",
+          "Pipeline-local id in the enclosing GameObject (includes xi:include targets).",
+        ),
+      );
+    }
+    return items;
   }
 
   // ── Element content ───────────────────────────────────────────────
@@ -360,7 +417,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     ctx: CompletionContext,
     _document: vscode.TextDocument,
     _position: vscode.Position,
-    _idx: ModIndex,
+    _idx: ModIndex | null,
   ): vscode.CompletionItem[] {
     const el = ctx.element;
     if (!el) return [];

@@ -90,7 +90,9 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
 - 中小项目：`C:\Apps\RA3-MODSDK-X\Mods\AttachTest`、`D:\Mods\CoronaMod\mods\mods\GenEvoTest`。
 - 大型项目：`D:\Mods\CoronaMod\mods\mods\corona`（自带 `xsd/`）。
 - 现有工具：工作区 `check_duplicate_ids.py`（include 解析与重复 ID 检测的参考实现）。
-- manifest 格式参考：OpenSAGE `src/OpenSage.Game/Data/StreamFS/ManifestFile.cs`（commit `d45d361`，最新分支已移除该文件）。本机网络受限未能拉取，且 manifest 为压缩/哈希的二进制，本期不实现其解析。
+- manifest 格式参考：OpenSAGE `src/OpenSage.Game/Data/StreamFS/ManifestFile.cs`
+  （commit `d45d361`，本仓库 `OpenSAGE/` 子目录）。插件已实现 v5/v6/v7 二进制
+  解析（`src/indexer/manifestParser.ts`），未知 TypeId 哈希时按资产名前缀推导类型。
 
 ## 四、验收标准
 

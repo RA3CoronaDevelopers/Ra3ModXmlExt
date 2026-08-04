@@ -96,8 +96,11 @@ export function resolveReferenceTargetsForType(
   attrName: string,
   id: string,
 ): ReferenceTarget[] {
-  const defs = idx.assetsById.get(id.toLowerCase());
-  if (!defs?.length) return [];
+  const defs = mergeLocalAndGlobalDefs(
+    idx.local?.assetsById.get(id.toLowerCase()),
+    idx.assetsById.get(id.toLowerCase()),
+  );
+  if (!defs.length) return [];
 
   const nameLower = attrName.toLowerCase();
   let refType: string | null = null;
@@ -126,4 +129,26 @@ export function resolveReferenceTargetsForType(
   }
   targets.sort((a, b) => a.score - b.score || a.def.id.localeCompare(b.def.id));
   return targets;
+}
+
+/**
+ * Merges document-local definitions with the global index, keeping local
+ * entries first and de-duplicating definitions that exist in both.
+ */
+export function mergeLocalAndGlobalDefs(
+  local: readonly AssetDef[] | undefined,
+  global: readonly AssetDef[] | undefined,
+): AssetDef[] {
+  const seen = new Set<string>();
+  const out: AssetDef[] = [];
+  for (const list of [local, global]) {
+    if (!list) continue;
+    for (const def of list) {
+      const key = `${def.type}\u0000${def.id.toLowerCase()}\u0000${def.file}\u0000${def.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(def);
+    }
+  }
+  return out;
 }

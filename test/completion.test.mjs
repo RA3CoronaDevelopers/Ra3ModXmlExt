@@ -76,6 +76,8 @@ require.cache["vscode-stub"] = {
 };
 
 const { Ra3CompletionProvider } = require("../out/features/completion.js");
+const { parseXml, LineMap } = require("../out/language/xmlParser.js");
+const { expandDocument } = require("../out/indexer/logicalTree.js");
 
 function makeDocument(text) {
   const lineStarts = [0];
@@ -98,9 +100,26 @@ function makeDocument(text) {
   };
 }
 
-// Enum completions do not consult the index, but provideCompletionItems only
-// routes value contexts when the workspace index is present.
-const provider = new Ra3CompletionProvider({ index: {} });
+async function makeScope(text, idx) {
+  const lineMap = new LineMap(text);
+  const parse = parseXml(text);
+  const expanded = await expandDocument("test.xml", parse, {
+    resolve: () => null,
+    readDom: async () => null,
+  });
+  return { expanded, merged: idx, overlay: {} };
+}
+
+// Enum completions do not consult the index, and value contexts now work
+// even before the workspace index exists.
+const makeProvider = (idx) =>
+  new Ra3CompletionProvider({
+    index: idx,
+    isRa3Workspace: () => true,
+    getScope: async (document) => makeScope(document.getText(), idx),
+  });
+const provider = makeProvider({});
+const providerNoIndex = makeProvider(null);
 const token = { isCancellationRequested: false };
 
 test("Surfaces enum completion works with an unclosed quote", async () => {
@@ -154,4 +173,74 @@ test("empty unterminated value offers all enum values", async () => {
   assert.ok(labels.includes("GROUND"));
   assert.ok(labels.includes("WATER"));
   assert.ok(labels.includes("CRUSHABLE_WALL"));
+});
+
+test("enum completions work without an index", async () => {
+  const text =
+    `<AssetDeclaration>\n  <LocomotorTemplate id="x" Surfaces="G>\n  <Other/>\n</LocomotorTemplate>\n</AssetDeclaration>`;
+  const line1 = text.split("\n")[1];
+  const pos = new Position(1, line1.indexOf("G") + 1);
+
+  const items = await providerNoIndex.provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("GROUND"), "enum value offered without an index");
+  assert.ok(!labels.includes("WATER"));
+});
+
+test("element and attribute name completions work without an index", async () => {
+  const text = `<AssetDeclaration>\n  <LocomotorTemplate `;
+  const line1 = text.split("\n")[1];
+  const pos = new Position(1, line1.length);
+
+  const items = await providerNoIndex.provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("id"));
+  assert.ok(labels.includes("Surfaces"));
+});
+
+test("content (child element) completions work without an index", async () => {
+  const text =
+    `<AssetDeclaration>\n  <LocomotorTemplate id="x">\n    \n  </LocomotorTemplate>\n</AssetDeclaration>`;
+  const pos = new Position(2, 4);
+
+  const items = await providerNoIndex.provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.length > 0, "child elements offered without an index");
+});
+
+test("Poid attributes offer ids from the enclosing GameObject's local scope", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <GameObject id="Tank">\n` +
+    `    <Draws>\n` +
+    `      <TruckDraw id="ModuleTag_Draw" />\n` +
+    `    </Draws>\n` +
+    `    <BehaviorModules>\n` +
+    `      <ReconstituteStateSpecialAbility UpdateModuleId="ModuleTag_D">\n` +
+    `    </BehaviorModules>\n` +
+    `  </GameObject>\n` +
+    `</AssetDeclaration>`;
+  const line6 = text.split("\n")[6];
+  const pos = new Position(6, line6.indexOf("ModuleTag_D") + "ModuleTag_D".length);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("ModuleTag_Draw"));
+  assert.ok(items.every((i) => i.kind === CompletionItemKind.Value));
+  assert.ok(
+    items.every((i) => i.detail === "local module"),
+    "Poid completions are labelled as local-scope ids",
+  );
 });

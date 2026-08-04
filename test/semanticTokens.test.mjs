@@ -130,13 +130,13 @@ test("fallback tokens cover names, attributes and values", () => {
 
 test("well-formed XML gets no semantic fallback tokens", async () => {
   const text = `<AssetDeclaration>\n  <LocomotorTemplate id="x" Surfaces="GROUND"/>\n</AssetDeclaration>`;
-  const provider = new Ra3SemanticTokensProvider();
+  const provider = new Ra3SemanticTokensProvider({ isRa3Workspace: () => true });
   const result = await provider.provideDocumentSemanticTokens(makeDocument(text), {});
   assert.equal(result.data.length, 0);
 });
 
 test("malformed XML gets semantic fallback tokens", async () => {
-  const provider = new Ra3SemanticTokensProvider();
+  const provider = new Ra3SemanticTokensProvider({ isRa3Workspace: () => true });
   const result = await provider.provideDocumentSemanticTokens(
     makeDocument(MALFORMED),
     {},

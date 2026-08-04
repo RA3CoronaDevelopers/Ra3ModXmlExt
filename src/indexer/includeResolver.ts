@@ -8,6 +8,7 @@
 
 import { join, resolve, normalize, isAbsolute } from "node:path";
 import { statSync } from "node:fs";
+import type { ExistenceSnapshot } from "./existence";
 
 export type IncludeKind = "all" | "instance" | "reference";
 export type SourcePrefix = "DATA" | "ART" | "AUDIO" | null;
@@ -99,41 +100,58 @@ export function resolveSource(
   source: string,
   currentDir: string | null,
   searchPaths: SearchPaths,
+  existence?: ExistenceSnapshot,
 ): ResolveResult {
   const raw = source.trim().replace(/\\/g, "/");
   const { prefix, rest } = splitPrefix(raw);
 
   if (prefix) {
     const bases = searchPaths[prefix] ?? [];
-    const direct = findInBases(rest, bases);
+    const direct = findInBases(rest, bases, existence);
     if (direct) return { path: direct, prefix, raw };
     if (prefix === "ART" && !rest.includes("/")) {
       const two = rest.slice(0, 2).toLowerCase();
-      const prefixed = findInBases(`${two}/${rest}`, bases);
+      const prefixed = findInBases(`${two}/${rest}`, bases, existence);
       if (prefixed) return { path: prefixed, prefix, raw };
     }
     return { path: null, prefix, raw };
   }
 
   if (currentDir && isAbsolute(rest)) {
-    return { path: fileExists(rest) ? rest : null, prefix: null, raw };
+    return {
+      path: fileExists(rest, existence) ? rest : null,
+      prefix: null,
+      raw,
+    };
   }
   if (currentDir) {
     const candidate = resolve(currentDir, rest);
-    return { path: fileExists(candidate) ? candidate : null, prefix: null, raw };
+    return {
+      path: fileExists(candidate, existence) ? candidate : null,
+      prefix: null,
+      raw,
+    };
   }
   return { path: null, prefix: null, raw };
 }
 
-function findInBases(relPath: string, bases: string[]): string | null {
+function findInBases(
+  relPath: string,
+  bases: string[],
+  existence?: ExistenceSnapshot,
+): string | null {
   for (const base of bases) {
     const candidate = normalize(resolve(base, relPath));
-    if (fileExists(candidate)) return candidate;
+    if (fileExists(candidate, existence)) return candidate;
   }
   return null;
 }
 
-function fileExists(path: string): boolean {
+function fileExists(path: string, existence?: ExistenceSnapshot): boolean {
+  if (existence) {
+    const known = existence.has(path);
+    if (known !== null) return known;
+  }
   try {
     return statSync(path).isFile();
   } catch {
