@@ -117,6 +117,7 @@ const makeProvider = (idx) =>
     index: idx,
     isRa3Workspace: () => true,
     getScope: async (document) => makeScope(document.getText(), idx),
+    log: () => {},
   });
 const provider = makeProvider({});
 const providerNoIndex = makeProvider(null);
@@ -159,6 +160,95 @@ test("list values filter on the token after whitespace", async () => {
   // Replacement range covers only the second token, not "GROUND ".
   const water = items.find((i) => i.label === "WATER");
   assert.equal(water.range.start.character, valueStart + "GROUND ".length - line1Start);
+});
+
+test("list completion after a space offers only unused flags", async () => {
+  const text =
+    `<AssetDeclaration>\n  <LocomotorTemplate id="x" Surfaces="GROUND ">\n  <Other/>\n</LocomotorTemplate>\n</AssetDeclaration>`;
+  const line1 = text.split("\n")[1];
+  const pos = new Position(1, line1.indexOf("GROUND ") + "GROUND ".length);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const labels = items.map((i) => i.label);
+  assert.equal(items.length, 10);
+  assert.ok(labels.includes("WATER"));
+  assert.ok(!labels.includes("GROUND"));
+
+  // The replacement range is empty at the cursor: existing flags are kept.
+  const water = items.find((i) => i.label === "WATER");
+  assert.equal(water.range.start.character, pos.character);
+  assert.equal(water.range.end.character, pos.character);
+});
+
+test("inserting a flag in the middle of a list does not delete trailing flags", async () => {
+  const text =
+    `<AssetDeclaration>\n  <LocomotorTemplate id="x" Surfaces="GROUND WATER">\n  <Other/>\n</LocomotorTemplate>\n</AssetDeclaration>`;
+  const line1 = text.split("\n")[1];
+  // Cursor right after the space between GROUND and WATER.
+  const pos = new Position(1, line1.indexOf("GROUND ") + "GROUND ".length);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("WATER"));
+  assert.ok(!labels.includes("GROUND"));
+  const water = items.find((i) => i.label === "WATER");
+  assert.equal(water.insertText, "WATER");
+  // The range must end at the cursor, not at the end of the whole value
+  // (which would replace the trailing "WATER" when accepting a suggestion).
+  assert.equal(water.range.start.character, pos.character);
+  assert.equal(water.range.end.character, pos.character);
+});
+
+test("complete flag at the end of a closed value appends the remaining flags", async () => {
+  const text =
+    `<AssetDeclaration>\n  <LocomotorTemplate id="x" Surfaces="GROUND">\n  <Other/>\n</LocomotorTemplate>\n</AssetDeclaration>`;
+  const line1 = text.split("\n")[1];
+  const pos = new Position(1, line1.indexOf("GROUND") + "GROUND".length);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const labels = items.map((i) => i.label);
+  assert.equal(items.length, 10);
+  assert.ok(!labels.includes("GROUND"));
+  const water = items.find((i) => i.label === "WATER");
+  assert.ok(water, "remaining flags are offered at the end of a complete flag");
+  assert.equal(water.insertText, " WATER");
+  assert.equal(water.range.start.character, pos.character);
+  assert.equal(water.range.end.character, pos.character);
+});
+
+test("prefix-extended flags keep prefix filtering instead of append mode", async () => {
+  const text =
+    `<AssetDeclaration>\n  <ObjectFilter Include="CAN_ATTACK">\n  <Other/>\n</ObjectFilter>\n</AssetDeclaration>`;
+  const line1 = text.split("\n")[1];
+  const pos = new Position(1, line1.indexOf("CAN_ATTACK") + "CAN_ATTACK".length);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("CAN_ATTACK_WALLS"));
+  assert.ok(labels.includes("CAN_ATTACK_STEALTHED"));
+  assert.ok(!labels.includes("WATER"));
+  const walls = items.find((i) => i.label === "CAN_ATTACK_WALLS");
+  assert.equal(walls.insertText, "CAN_ATTACK_WALLS");
+  // The range replaces the typed token instead of inserting after it.
+  assert.equal(walls.range.start.character, pos.character - "CAN_ATTACK".length);
+  assert.equal(walls.range.end.character, pos.character);
+});
+
+test("multi-line unterminated Disposition value offers remaining flags", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE `;
+  const line4 = text.split("\n")[4];
+  const pos = new Position(4, line4.length);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("DISPOSITION_NONE"));
+  assert.ok(labels.includes("FLOATING"));
+  assert.ok(!labels.includes("RANDOM_FORCE"));
 });
 
 test("empty unterminated value offers all enum values", async () => {
@@ -204,6 +294,140 @@ test("element and attribute name completions work without an index", async () =>
   const labels = items.map((i) => i.label);
   assert.ok(labels.includes("id"));
   assert.ok(labels.includes("Surfaces"));
+});
+
+test("attribute completion after a closed quote inserts a space", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject Options="IGNORE_ALL_OBJECTS" Disposition="RANDOM_FORCE RELATIVE_ANGLE">`;
+  const line2 = text.split("\n")[2];
+  const pos = new Position(
+    2,
+    line2.indexOf('RELATIVE_ANGLE"') + 'RELATIVE_ANGLE"'.length,
+  );
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const count = items.find((i) => i.label === "Count");
+  assert.ok(count, "Count is a valid next attribute");
+  assert.equal(count.insertText.value, ' Count="1"');
+  // The replacement range is empty at the cursor; the space comes from the
+  // insert text so the attribute never glues to the closing quote.
+  assert.equal(count.range.start.character, pos.character);
+  assert.equal(count.range.end.character, pos.character);
+});
+
+test("attribute completion on one-per-line elements adds a newline", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE">`;
+  const line4 = text.split("\n")[4];
+  const pos = new Position(
+    4,
+    line4.indexOf('RELATIVE_ANGLE"') + 'RELATIVE_ANGLE"'.length,
+  );
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const count = items.find((i) => i.label === "Count");
+  assert.ok(count);
+  // The editor adds the new line's base indentation itself; embedding our
+  // own indent here would be added on top of it and compound line by line.
+  assert.equal(count.insertText.value, '\nCount="1"');
+  assert.equal(count.range.start.character, pos.character);
+  assert.equal(count.range.end.character, pos.character);
+});
+
+test("attribute completion on a new line aligns with the neighbor indent", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE"\n` +
+    `      `;
+  const pos = new Position(5, 6);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const count = items.find((i) => i.label === "Count");
+  assert.ok(count);
+  assert.equal(count.insertText.value, '      Count="1"');
+  // The range replaces the whitespace already typed on the new line.
+  assert.equal(count.range.start.character, 0);
+  assert.equal(count.range.end.character, 6);
+});
+
+test("a half-typed attribute on a new line does not drive the indent", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE"\n` +
+    `      Count="1"\n` +
+    `                    C`;
+  // The "C" line carries a large editor auto-indent (20 spaces) that must
+  // NOT become the anchor for the completed attribute.
+  const pos = new Position(6, 21);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const createFX = items.find((i) => i.label === "CreateFX");
+  assert.ok(createFX);
+  assert.equal(createFX.insertText.value, '      CreateFX="$1"');
+  // The range covers the auto-indented whitespace and the typed "C".
+  assert.equal(createFX.range.start.character, 0);
+  assert.equal(createFX.range.end.character, 21);
+});
+
+test("whitespace used to trigger the popup is consumed on newline insert", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE" >`;
+  const line4 = text.split("\n")[4];
+  const pos = new Position(
+    4,
+    line4.indexOf('RELATIVE_ANGLE" ') + 'RELATIVE_ANGLE" '.length,
+  );
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const count = items.find((i) => i.label === "Count");
+  assert.ok(count);
+  assert.equal(count.insertText.value, '\nCount="1"');
+  // The range starts at the previous attribute's closing quote, so the
+  // typed space is replaced by the newline instead of lingering.
+  assert.equal(count.range.start.character, pos.character - 1);
+  assert.equal(count.range.end.character, pos.character);
+});
+
+test("scalar attributes get typed default values, suggestion attributes keep $1", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject `;
+  const pos = new Position(2, text.split("\n")[2].length);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const item = (label) => items.find((i) => i.label === label);
+
+  // XSD default wins.
+  assert.equal(item("Count").insertText.value, 'Count="1"');
+  // Type-based examples for scalars without an XSD default.
+  assert.equal(item("FadeTime").insertText.value, 'FadeTime="0s"');
+  assert.equal(item("DispositionAngle").insertText.value, 'DispositionAngle="0d"');
+  // Suggestion-driven values keep the $1 placeholder and re-trigger suggest.
+  assert.equal(item("CreateFX").insertText.value, 'CreateFX="$1"');
+  assert.ok(item("CreateFX").command, "reference values re-trigger suggest");
+  assert.equal(item("Options").insertText.value, 'Options="$1"');
+  assert.ok(item("Options").command, "list values re-trigger suggest");
+  assert.equal(item("DisabledWhileBusy").insertText.value, 'DisabledWhileBusy="$1"');
+  assert.ok(item("DisabledWhileBusy").command, "boolean values re-trigger suggest");
+  // Concrete defaults do not pop an empty suggest widget.
+  assert.equal(item("Count").command, undefined);
 });
 
 test("content (child element) completions work without an index", async () => {

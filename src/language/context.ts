@@ -1,4 +1,5 @@
 import type { XmlAttribute, XmlDocument, XmlElement } from "./xmlParser";
+import { parseTag } from "./xmlParser";
 
 export type ContextKind =
   | "element-name"
@@ -42,6 +43,15 @@ export function analyzeContext(
     return analyzeStartTag(container, text, offset);
   }
 
+  // A start tag that had to be recovered (e.g. an attribute quote is still
+  // open) is truncated at the first line break, so attributes typed on later
+  // lines of the same tag are not part of the parsed element. Re-parse the
+  // partial tag up to the cursor so value/attribute completion keeps working
+  // while typing in the malformed tag.
+  if (container.recoveredStartTag) {
+    return analyzeRecoveredStartTag(container, text, offset);
+  }
+
   // Otherwise the cursor is in element content.
   return {
     kind: "content",
@@ -51,6 +61,33 @@ export function analyzeContext(
     valuePrefix: "",
     existingAttrs: [],
   };
+}
+
+/**
+ * Classifies the cursor inside a recovered (truncated) start tag by re-parsing
+ * the raw tag content up to the cursor. The original element only kept the
+ * attributes that fit on its first line; re-parsing the partial text recovers
+ * attributes typed on later lines without affecting the rest of the document.
+ */
+function analyzeRecoveredStartTag(
+  el: XmlElement,
+  text: string,
+  offset: number,
+): CompletionContext {
+  const raw = parseTag(text.slice(el.start + 1, offset), el.start + 1);
+  const partial: XmlElement = {
+    name: raw.name,
+    attrs: raw.attrs,
+    children: [],
+    parent: el.parent,
+    start: raw.start,
+    startTagEnd: offset,
+    end: offset,
+    selfClosing: raw.selfClosing,
+    closeTagStart: -1,
+    depth: el.depth,
+  };
+  return analyzeStartTag(partial, text, offset);
 }
 
 function analyzeStartTag(
@@ -83,7 +120,7 @@ function analyzeStartTag(
       attr.hasValue &&
       attr.quoteStart >= 0 &&
       offset >= attr.quoteStart &&
-      (attr.quoteEnd < 0 || offset <= attr.quoteEnd)
+      (attr.quoteEnd < 0 || offset < attr.quoteEnd)
     ) {
       const start = attr.valueStart;
       const prefix = offset > start ? text.slice(start, offset) : "";

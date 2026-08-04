@@ -67,6 +67,16 @@ test("recovers from an unterminated attribute value at end of line", () => {
   assert.ok(b.start > a.start);
 });
 
+test("marks recovered start tags for partial completion re-parsing", () => {
+  const text = `<AssetDeclaration>\n  <A x="1" y="abc\n  <B/>\n  </A>\n</AssetDeclaration>`;
+  const doc = parseXml(text);
+  const a = doc.elements.find((e) => e.name === "A");
+  assert.equal(a.recoveredStartTag, true);
+  // Well-formed elements parsed normally do not carry the marker.
+  const b = doc.elements.find((e) => e.name === "B");
+  assert.equal(b.recoveredStartTag, undefined);
+});
+
 test("reports an unterminated attribute value at EOF", () => {
   const text = `<A x="abc`;
   const doc = parseXml(text);

@@ -43,6 +43,12 @@ export interface XmlElement {
   /** Offset of "</" of the closing tag, or -1 when self-closing. */
   closeTagStart: number;
   depth: number;
+  /**
+   * True when the start tag was unterminated and recovered at a line break.
+   * Attributes typed on later lines of the same tag are not part of the
+   * parsed element; completion re-parses the partial tag up to the cursor.
+   */
+  recoveredStartTag?: boolean;
 }
 
 export interface XmlParseError {
@@ -119,7 +125,7 @@ interface RawTag {
 
 const NAME_RE = /[A-Za-z_][\w:.-]*/y;
 
-function parseTag(content: string, contentStart: number): RawTag {
+export function parseTag(content: string, contentStart: number): RawTag {
   const base = contentStart;
   let j = 0;
   while (j < content.length && /\s/.test(content[j])) {
@@ -357,8 +363,15 @@ export function parseXml(text: string): XmlDocument {
       const raw = parseTag(content, i + 1);
       if (raw.name) {
         const el = buildElement(raw, stack.length);
+        el.recoveredStartTag = true;
         elements.push(el);
-        root = root ?? el;
+        if (stack.length === 0) {
+          root = root ?? el;
+        } else {
+          const parent = stack[stack.length - 1];
+          parent.children.push(el);
+          el.parent = parent;
+        }
         stack.push(el);
       }
       i = recoverTo + 1;

@@ -7,11 +7,11 @@
 - **语法高亮**：在普通 XML 高亮之上叠加领域标记（`$DEFINE` 常量、`inheritFrom`、`xai:joinAction`、结构标签）；XML 语法异常（如未闭合引号）期间由语义 token 兜底，标签/属性/值着色不中断。
 - **自动补全**：
   - 元素名：按当前父元素的 XSD 模型补全子元素；顶层资产（`AssetDeclaration` 内）补全 `GameObject`、`WeaponTemplate` 等 295 种类型。
-  - 属性名：必填属性优先，附带类型/文档/默认值；自动提示 `xai:joinAction` 与 `xmlns:xai`。
+  - 属性名：必填属性优先，附带类型/文档/默认值；自动提示 `xai:joinAction` 与 `xmlns:xai`。接受补全时自动避免与上一个属性贴在一起，并按文件已有的排版补空格或换行（换行的基础缩进由编辑器提供，插件不再内嵌缩进以免叠加）；数字/角度/时间等标量属性直接填入 XSD 默认值或类型示例（如 `0d`、`0s`），引用/枚举/布尔等保留真正的 `$1` 占位符并弹出值补全。
   - 属性值：
     - 引用型属性（如 `CommandSet`、`Weapon`）按 `xas:refType` 补全对应类型的资产 ID（**同名 ID 只补全匹配类型**）；
     - `inheritFrom` 补全可继承的资产 ID；
-    - 枚举与位标志列表（如 `Include type`、`LocomotorTemplate@Surfaces`、`KindOf`；列表值支持空格后继续补全下一项）；
+    - 枚举与位标志列表（如 `Include type`、`LocomotorTemplate@Surfaces`、`KindOf`；列表值在空格后自动继续补全下一项，已使用的 flag 不再重复推荐，闭合值末尾可直接追加新 flag）；
     - 布尔值、`$DEFINE` 常量；
     - `<Include source>` 补全可解析的 `DATA:` / `ART:` / `AUDIO:` 与项目相对路径。
 - **悬停提示**：元素/属性显示 XSD 文档、类型、必填/默认值；引用值显示定义位置；`$DEFINE` 显示值与定义位置；`Include source` / `xi:include href` 显示解析后的目标文件；`xi:include` 元素与属性给出 XInclude 说明。

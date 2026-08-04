@@ -1,6 +1,6 @@
 # 调研结论与实施计划（已按最新代码同步更新）
 
-> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-01）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮等。
+> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-04）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）等。
 
 ## 一、调研结论（带证据）
 
@@ -132,10 +132,16 @@ test/
 11. **`xs:list` 建模与多值补全**：list 简单类型继承 itemType 的枚举 / refType / isRef /
     allowsDefine 并标记 `isList`（`LocomotorSurfaceBitFlags`、`KindOfBitFlags` 等 79 个
     类型、317 处属性声明受益）；补全只对“最后一个空格段”过滤，替换范围只覆盖当前段，
-    支持 `Surfaces="GROUND ` 之后继续输入 `W` 提示 `WATER`。
+    支持 `Surfaces="GROUND ` 之后继续输入 `W` 提示 `WATER`。第十三轮（2026-08-04）
+    补全触发与编辑体验：空格注册为触发字符；列表过滤排除已出现的 flag；当前段已是
+    完整枚举值且没有更长变体时进入“追加模式”（零宽 range + `insertText=" FLAG"`，
+    可直接在闭合值末尾/中间追加）；替换范围止于光标，中间插入不会删除尾部 flag。
 12. **未闭合引号的行尾恢复**：起始标签扫描到 EOF 且引号未闭合时，在第一个换行处截断
     标签并继续解析，未闭合只影响当前行（仍上报 `Unterminated start tag`），后续元素
-    的补全 / hover / 诊断不中断。
+    的补全 / hover / 诊断不中断。第十三轮补充：恢复出的元素带 `recoveredStartTag`
+    标记并补挂父链；补全上下文对“光标在恢复元素内但越过 `startTagEnd`”的情况按
+    `text.slice(tagStart, cursor)` 重新解析部分标签，使多行书写的未闭合属性
+    （如 `Disposition="`）仍可获得 attribute-value 补全，且不影响全局解析。
 13. **语义 token 兜底高亮**：TextMate 对未闭合引号会把后续内容当字符串吞掉（任何
     XML 编辑器皆然）；扩展注册 `DocumentSemanticTokensProvider`，仅当解析报错时用
     语义 token 覆盖标签名 / 属性名 / 属性值（标准 token 类型 `type` / `property` /
@@ -214,6 +220,19 @@ test/
     （`AttachModuleId` / `ModuleId` / `AutoResolveBody` 等）在最近 GameObject
     子树内解析；未命中不新增诊断（保守策略，避免跨文件误报）。
     顶层 `<Include type="all">` 暂不并入逻辑树（保留为后续扩展）。
+26. **属性补全的插入布局与类型化默认值（第十四轮，2026-08-04）**：
+    `attributeInsertLayout` 按临近属性的排版决定插入方式——贴引号时补空格、
+    一行一个属性时补换行 + 缩进、已在新行时用临近缩进替换当前行空白、
+    inline 风格的手动换行保留用户缩进；`attributeValuePlaceholder` 对引用/
+    枚举/list/布尔等建议类属性保留 `$1` + 自动触发，对标量属性填 XSD 默认值
+    或类型示例（`0d` / `0s` / `100%` / `0.0` / `0`），具体默认值不再弹空
+    suggest。
+    第十五轮（2026-08-04）最终结论：VS Code 插入含换行的补全文本时会把当前
+    行基础缩进与文本内嵌缩进相加（3+3=6、6+3=9…），因此换行前缀只插入 `\n`、
+    缩进交给编辑器；同时半截属性名（`hasValue=false`）不再作为缩进锚点，改用
+    第一个独占一行的完整属性作为规范缩进，插入换行时顺带吞掉触发补全留下的
+    尾随空格；属性名补全改用 `SnippetString`（`$1` 成为真正占位符），并新增
+    输出通道调试日志。
 
 ## 三、实施步骤
 
@@ -250,6 +269,15 @@ test/
     + Poid 局部作用域补全/悬停/跳转；测试 92 → 98。2026-08-04 补充构建期
     闸门：`getScope` 在重建进行中只返回 parse-only scope，避免与 indexer
     抢盘（版本 0.1.9）。
+16. [x] bit-flag 列表补全修复（第十三轮，2026-08-04）：空格触发字符、多行
+    未闭合标签的部分标签重解析（`recoveredStartTag` 标记 + 恢复元素父链）、
+    闭合值内追加模式与中间插入范围修复；测试 98 → 107（版本 0.1.10）。
+17. [x] 属性补全插入体验（第十四轮，2026-08-04）：闭合引号后自动补空格、
+    临近属性缩进对齐、标量属性类型化默认值；测试 107 → 111（版本 0.1.11）。
+18. [x] 属性补全缩进叠加修复（第十五轮，2026-08-04）：换行前缀只插入 `\n`
+    （编辑器自动补基础缩进，避免 3+3=6 式叠加）、完整属性锚点 + 首个独占一行
+    属性为规范缩进、`$1` 改为 SnippetString 占位符、输出通道调试日志、尾随
+    空格吞除；测试 111 → 113（版本 0.1.12–0.1.13）。
 
 ## 四、验证结果（实测）
 
@@ -259,7 +287,20 @@ test/
 | GenEvoTest | 66 文件 | 首次 ~2.6s / 二次 ~0.4s | 35,502（manifest 35,322，w3x 浅扫 38） | 2 个流、73 个 Define；二次构建 0 重扫 / 38 缓存命中 |
 | Corona | 8,976 文件 | 首次 ~250s / 信任二次 ~2s / 强制 ~5-25s | 64,868（manifest 35,322，w3x 浅扫 4,829） | 3 个流、183 个 Define、0 诊断；二次构建 statSync 0、resolveHits 15,333 |
 
-单元测试覆盖：XML 解析（自闭合/容错/偏移/未闭合引号行尾恢复）、补全上下文（未闭合引号仍为 attribute-value、list 多值分段）、补全集成（vscode stub 下 `LocomotorTemplate@Surfaces` 未闭合引号枚举补全、空格后第二段过滤与替换范围）、语义 token（标签/属性/值范围、合法文档返回空、malformed 返回兜底 token）、include 解析（BAB 顺序、SDK 根优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、`childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list` 枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中 manifest 的 `PlayerTemplate`）。
+单元测试覆盖：XML 解析（自闭合/容错/偏移/未闭合引号行尾恢复 + recovered
+标记）、补全上下文（未闭合引号仍为 attribute-value、多行未闭合引号、list 多值
+分段、闭合引号后为 attribute-name）、补全集成（vscode stub 下
+`LocomotorTemplate@Surfaces` 未闭合引号枚举补全、空格后第二段过滤与替换范围、
+空格后排除已用 flag、中间插入范围止于光标、闭合值末尾追加模式、`CAN_ATTACK`
+前缀保护、多行未闭合 `Disposition` 完整链路、闭合引号后补空格、一行一个属性
+换行缩进、新行缩进对齐、标量类型化默认值）、语义 token（标签/属性/值范围、
+合法文档返回空、malformed 返回兜底 token）、include 解析（BAB 顺序、SDK 根
+优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器
+（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、
+`childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list`
+枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、
+模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中
+manifest 的 `PlayerTemplate`）。
 
 > 注：D: 盘移动硬盘已恢复连接；Corona 已在第八 / 九轮按上述新数据回归。
 

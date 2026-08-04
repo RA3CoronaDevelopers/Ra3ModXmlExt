@@ -113,6 +113,11 @@ export class ModWorkspace {
     return this.projectRoot != null;
   }
 
+  /** Appends a line to the "RA3 Mod XML" output channel (debug/troubleshooting). */
+  log(message: string): void {
+    this.output.appendLine(message);
+  }
+
   /** True while a rebuild is running (before any snapshot is published). */
   get isBuilding(): boolean {
     return this.building;

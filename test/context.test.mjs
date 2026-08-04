@@ -34,6 +34,46 @@ test("closed quote still resolves value context", () => {
   assert.equal(ctx.valuePrefix, "GROUND");
 });
 
+test("multi-line unterminated quote keeps attribute-value context", () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="`;
+  const cursor = text.length;
+  const doc = parseXml(text);
+  const ctx = analyzeContext(doc, text, cursor);
+  assert.equal(ctx.kind, "attribute-value");
+  assert.equal(ctx.attr?.name, "Disposition");
+  assert.equal(ctx.valuePrefix, "");
+  assert.equal(ctx.element?.name, "CreateObject");
+});
+
+test("multi-line unterminated value prefix includes typed flags", () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE `;
+  const cursor = text.length;
+  const doc = parseXml(text);
+  const ctx = analyzeContext(doc, text, cursor);
+  assert.equal(ctx.kind, "attribute-value");
+  assert.equal(ctx.attr?.name, "Disposition");
+  assert.equal(ctx.valuePrefix, "RANDOM_FORCE ");
+});
+
+test("cursor after a closed quote is an attribute-name context", () => {
+  const text = `<Locomotor id="x" Surfaces="GROUND">\n</Locomotor>`;
+  const cursor = text.indexOf('GROUND"') + 'GROUND"'.length;
+  const doc = parseXml(text);
+  const ctx = analyzeContext(doc, text, cursor);
+  assert.equal(ctx.kind, "attribute-name");
+  assert.equal(ctx.attr, null);
+});
+
 test("splitListValuePrefix isolates the token being edited", () => {
   assert.deepEqual(splitListValuePrefix("GROUND WA"), { token: "WA", start: 7 });
   assert.deepEqual(splitListValuePrefix("GROUND "), { token: "", start: 7 });

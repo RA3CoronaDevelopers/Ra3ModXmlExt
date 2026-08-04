@@ -1064,3 +1064,217 @@ stale=true 并触发 follow-up。处理（按用户建议的扩展名白名单�
 输出通道同步增加 `walk / candidates / art` 耗时分解，便于下次直接定位慢在哪一段。
 
 版本 **0.1.8 → 0.1.9**。
+
+---
+
+## 十八、问题分析（第十三轮，2026-08-04）：bit-flag 列表补全的三层问题
+
+### 现象
+
+对 `xs:list` 枚举（bit flag，如 `CreateObject@Disposition`、
+`LocomotorTemplate@Surfaces`）：
+
+1. 刚打开引号时（`Disposition="`）能补全；
+2. 输入第一项后再输入空格，**不触发**补全；
+3. 已经闭合的 `Disposition="RANDOM_FORCE RELATIVE_ANGLE"` 想在中间插入或末尾
+   追加 flag，**不触发**补全。
+
+### 根因（三个独立问题）
+
+**1. 空格没有注册为补全触发字符**
+
+`extension.ts` 注册 provider 时只传了 `< " = : . /`。VS Code 只在输入 word
+字符或已注册触发字符时自动弹出补全；空格两者都不是，所以“打 flag → 空格”
+永远不会自动弹出。刚打开引号能补全正是因为 `"` 已注册。
+
+**2. 多行未闭合引号下，解析恢复丢失后续行属性**
+
+解析器对未闭合开始标签的恢复策略是“截到第一个换行”（`xmlParser.ts`），因此
+像用户示例这样属性逐行书写的标签，`<CreateObject` 之后各行的 `Options` /
+`Disposition` 全部丢失，`startTagEnd` 停在 `<CreateObject` 行尾。光标在后续
+行时 `analyzeContext` 走 `content` 分支——实测 `kind: content, attrs: []`。
+也就是说，**按用户贴出的原文状态，当前代码其实并不会补全 Disposition**；
+观察到“能补全”的编辑状态里引号/`>` 多半已闭合。另外恢复分支没有把恢复出的
+元素挂到父元素下（`parent = null`），即使补上上下文分析，类型解析也会退回
+全局映射（`CreateObject` → `GameObjectWeakRef`）而找不到 `Disposition`。
+
+**3. 闭合引号内“插入/追加 flag”的体验与范围问题**
+
+- 光标在完整值末尾（`...RELATIVE_ANGLE|"`）时，当前 token 恰好等于完整枚举
+  值，`startsWith` 过滤只剩它自己 → 看起来“没有补全”；
+- 替换范围 bug：引号闭合时 `endOffset` 固定取整个值的末尾而不是光标位置。
+  实测光标在 `RANDOM_FORCE | RELATIVE_ANGLE` 中间时 range 为 `(28..42)`，
+  选中任意 flag 会删掉 `RELATIVE_ANGLE` 及之后的内容；
+- 光标恰好贴在闭合引号后面（`"|`）时，`offset <= quoteEnd` 把引号算进
+  prefix（`RELATIVE_ANGLE"`），返回 0 项。
+
+### 修复
+
+1. **触发字符**：`registerCompletionItemProvider` 增加 `" "`（空格）。副作用：
+   属性之间按空格会弹属性名补全（加分项），文本内容按空格会弹子元素补全。
+2. **多行未闭合标签的补全**：
+   - 解析器给恢复出的元素打 `recoveredStartTag` 标记，并**补挂父链**
+     （与正常分支一致，`parent.children.push` + `el.parent = parent`）；
+   - `analyzeContext` 在光标越过 `startTagEnd` 且元素带标记时，把
+     `text.slice(tagStart, cursor)` 作为部分标签重新 `parseTag` 一次，
+     再走同一套 start-tag 分类。全局解析恢复策略不变，后续文档解析/诊断
+     不受影响。
+   - 引号判定从 `offset <= quoteEnd` 改为 `offset < quoteEnd`：光标在闭合
+     引号之后进入 attribute-name 上下文。
+3. **list 补全范围与过滤**（`completion.ts`）：
+   - list 值替换范围改为 `min(cursor, valueEnd)`，只覆盖当前段；非 list
+     保持整值替换；
+   - 排除列表中已出现的 flag（空格后只推荐剩余项）；
+   - 追加模式：当前段已是完整枚举值且没有其它枚举以它为前缀时，给出零宽
+     range、`insertText = " FLAG"`，可直接在闭合值末尾/列表中间追加；
+     前缀保护是必要的——实测 820 个 list 枚举里有 10569 对严格前缀关系
+     （如 `CAN_ATTACK` → `CAN_ATTACK_WALLS`）。
+
+### 举一反三的测试（98 → 107 全绿）
+
+- `xmlParser.test.mjs`：恢复元素带 `recoveredStartTag` 标记、正常元素不带；
+- `context.test.mjs`：用户示例的多行未闭合引号（`Disposition="`）仍为
+  attribute-value 且 prefix 正确；输入 flag + 空格后 prefix 含完整值；闭合
+  引号之后为 attribute-name；
+- `completion.test.mjs`：
+  - 空格后只推荐未使用的 flag（10 项，不含 GROUND），range 零宽在光标处；
+  - 列表中间插入不会删掉尾部 flag（range 止于光标）；
+  - 闭合值末尾完整 flag → 追加模式（`insertText: " WATER"`）；
+  - `CAN_ATTACK` 有更长变体时保持前缀过滤，不进入追加模式；
+  - 多行未闭合 `Disposition="RANDOM_FORCE ` 经完整 provider 链路返回剩余
+    flag（不含 RANDOM_FORCE）。
+
+版本 **0.1.9 → 0.1.10**。
+
+---
+
+## 十九、问题分析（第十四轮，2026-08-04）：属性补全的插入体验
+
+### 现象
+
+写完一个属性值并关闭引号后，会立刻触发下一个属性的补全菜单（由 `"` 触发字符
+带来，方便）。但按 Enter 接受补全时不会补空格，结果属性与上一个属性的闭合
+引号贴在一起：
+
+```xml
+Disposition="RANDOM_FORCE RELATIVE_ANGLE"Count="$1"
+```
+
+连续接受会变成 `...RELATIVE_ANGLE"Count="$1"CreateFX="$1"DestinationPlayer="$1"`。
+
+另外提出两个功能请求：
+
+1. 新属性自动参考临近属性的缩进（很多 XML 的属性统一换行缩进）；
+2. 补全的 `$1` 占位符在允许时变成更有意义的值（数字 → 数字、角度 → 角度、
+   时间 → 时间），顺带提示值的格式。
+
+### 修复
+
+**1. 插入布局（`completion.ts` 新增 `attributeInsertLayout`）**
+
+- 光标紧贴上一个属性的闭合引号时，插入文本前补一个空格（inline 布局）；
+- 临近属性是“一行一个”布局（相邻属性之间的原文含换行）时，插入
+  `\n + 上一个属性的缩进`；
+- 用户已经回车换行时，用临近缩进替换当前行已有的空白（对齐）；
+- inline 风格的文件里用户手动换行，则保留用户自己打的缩进，不强改；
+- `xai:joinAction` / `xmlns:xai` 辅助项同样享受前缀与触发。
+
+**2. 类型化默认值（`completion.ts` 新增 `attributeValuePlaceholder`）**
+
+- 引用 / 枚举 / list / 布尔 / `inheritFrom` / `Include@source` / `id` 保留
+  `$1` 占位并自动触发值补全（这些值靠候选选择，不能瞎猜）；
+- 标量属性优先用 XSD `default`（如 `Count="1"`），没有默认值时按类型给示例：
+  `Angle → 0d`、`Time → 0s`、`Percentage → 100%`、`Velocity → 0.0`、
+  `SageReal/float → 0.0`、`SageInt/unsigned → 0`；
+- 填了具体默认值后不再弹空的 suggest 窗口；`allowsDefine` 的数值属性现在也
+  直接给数值示例（`$DEFINE` 仍可在值内手动触发补全）。
+
+### 举一反三的测试（107 → 111 全绿）
+
+- 闭合引号后接受属性 → ` Count="1"`（空格），range 零宽在光标处；
+- 一行一个属性 → `\n      Count="1"`（换行 + 缩进）；
+- 已在新行 → range 覆盖当前行空白，插入 `      Count="1"` 对齐；
+- 标量默认值：`Count="1"`（XSD 默认）、`FadeTime="0s"`、`DispositionAngle="0d"`；
+- 建议类属性：`CreateFX="$1"`、`Options="$1"`、`DisabledWhileBusy="$1"` 均带
+  trigger 命令；具体默认值不带。
+
+版本 **0.1.10 → 0.1.11**。
+
+---
+
+## 二十、问题分析（第十五轮，2026-08-04）：属性补全的缩进叠加与 `$1` 占位符
+
+### 现象
+
+连续接受属性补全时，缩进不是稳定对齐，而是逐行递增。用户分步实测（0.1.12）：
+
+- 关闭引号 → 属性候选菜单 → 直接 Enter：第一次补全 `Count="1"` 就落在
+  6 个 Tab（`Disposition` 是 3 个 Tab）；
+- 按空格再次触发 → Enter：`CreateFX="$1"` 落在 9 个 Tab；
+- 再 Enter（CreateFX 带触发命令，菜单自动重开）：`DestinationPlayer="$1"`
+  落在 12 个 Tab。
+
+```xml
+		<CreateObject
+			Options="IGNORE_ALL_OBJECTS"
+			Disposition="RANDOM_FORCE RELATIVE_ANGLE ABSOLUTE_ANGLE"
+						Count="1"
+									CreateFX="$1"
+												DestinationPlayer="$1"
+```
+
+### 根因
+
+VS Code 在插入**含换行的补全文本**时，会给新行套用当前行的基础缩进，并与
+补全文本里嵌入的缩进**相加**（而不是替换）：
+
+```text
+我们插入 \n + 3 Tab → 落盘 = 当前行 3 Tab + 我们 3 Tab = 6 Tab
+下一行：当前行 6 Tab + 我们 3 Tab = 9 Tab
+再下一行：9 + 3 = 12 Tab
+```
+
+与实测的 6 / 9 / 12 完全一致。关键证据是**第一次补全就已多缩进**：0.1.12
+第一次只插入 `\n` + 3 个 Tab（锚点是首个独占一行的 `Options`），落盘却是
+6 个——问题不在我们读取了谁的缩进，而在于补全文本自带的缩进被编辑器叠加。
+
+排查过程中还发现一个放大因素并已修复：`attributeInsertLayout` 原先以
+“最后一个被解析出的属性”为锚点，用户在自动缩进的新行上输入的半截属性名
+（`C`、`D`…，`hasValue = false`）也会被当成锚点，把编辑器自动缩进抄进补全
+行；即使叠加根因修掉，这个因素也会让缩进更容易跑偏。
+
+### 修复（0.1.13）
+
+1. **换行时只插入 `\n`，不再嵌入缩进**：编辑器自动补当前行的基础缩进
+   （3 Tab），叠加量为 0，后续行稳定在 3 Tab；已在新行时仍显式替换为规范
+   缩进（该路径不插入换行，不受叠加影响）。
+2. **锚点只用完整属性**（`hasValue` 为真），并优先取**第一个独占一行的完整
+   属性**作为规范缩进；半截属性名不参与缩进计算，整行内联时才回退到最后一个
+   完整属性。
+3. **`$1` 改为真正的 snippet 占位符**：属性名补全统一用 `SnippetString`，
+   文档中不再出现字面 `$1`；接受补全后光标落在引号内的占位处，弹出的也是值
+   补全菜单。`Count="1"` 这类具体默认值同样用 snippet（无占位符，光标落在
+   闭合引号后）。
+4. **尾随空格**：插入换行时，若上一个属性与光标之间只有空白（例如为触发补全
+   按的空格），把这段空白一并纳入替换范围，不再残留尾随空格。
+5. **调试日志**：`ModWorkspace.log()` 输出到 “RA3 Mod XML” 输出通道；
+   attribute-name 补全每次记录 `existing / range / prefix`（JSON 转义），用于
+   对比“我们插入的内容”与“落盘的内容”，定位编辑器侧改写。
+
+### 测试环境说明
+
+当前单测（node + vscode stub）**不能复现 VS Code 的 suggest 弹窗、snippet
+缩进与 auto-indent 行为**，这类问题只能靠实机 + 输出通道日志确认。后续若要
+自动化，需要引入 `@vscode/test-electron` 做扩展宿主集成测试（本期未做，记录
+为候选）。
+
+### 测试（111 → 113 全绿）
+
+- 新行上输入半截属性名（行缩进 20 个空格）→ 补全仍用规范缩进，range 覆盖
+  整段自动缩进与已输入字符；
+- 为触发补全按的空格被新行替换吞掉，不再残留尾随空格；
+- 属性名补全断言改为 `insertText.value`（SnippetString），换行插入断言为
+  `\nCount="1"`（缩进由编辑器提供）。
+
+版本 **0.1.11 → 0.1.13**（0.1.12 为中间版本，仅含锚点与尾随空格修复，
+未解决叠加；0.1.13 为最终修复）。
