@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseXml, findElementAt, stripBom } from "../out/language/xmlParser.js";
+import {
+  parseXml,
+  findElementAt,
+  stripBom,
+  textContentTokenAt,
+} from "../out/language/xmlParser.js";
 
 test("stripBom removes a leading UTF-8 byte-order mark", () => {
   assert.equal(stripBom("\uFEFF<A/>"), "<A/>");
@@ -44,6 +49,27 @@ test("findElementAt returns innermost element", () => {
   assert.equal(at.name, "C");
 });
 
+test("findElementAt treats a completed element's end as exclusive", () => {
+  const text = `<A><B>X</B></A>`;
+  const doc = parseXml(text);
+  const b = doc.elements.find((e) => e.name === "B");
+  const at = findElementAt(doc, b.end);
+  assert.equal(at?.name, "A", "cursor after </B> belongs to the parent");
+
+  const self = `<A><B/></A>`;
+  const selfDoc = parseXml(self);
+  const b2 = selfDoc.elements.find((e) => e.name === "B");
+  const atSelf = findElementAt(selfDoc, b2.end);
+  assert.equal(atSelf?.name, "A", "cursor after <B/> belongs to the parent");
+});
+
+test("findElementAt still includes EOF inside an unclosed element", () => {
+  const text = `<A><B>C`;
+  const doc = parseXml(text);
+  const b = doc.elements.find((e) => e.name === "B");
+  assert.equal(findElementAt(doc, text.length)?.name, "B");
+});
+
 test("tolerates partial input while typing", () => {
   const text = `<AssetDeclaration>\n\t<GameObject id="TestTank" Com`;
   const doc = parseXml(text);
@@ -85,4 +111,74 @@ test("reports an unterminated attribute value at EOF", () => {
   const a = doc.elements[0];
   assert.equal(a.attrs[0].value, "abc");
   assert.equal(a.attrs[0].quoteEnd, -1);
+});
+
+test("textContentTokenAt returns the token inside element content", () => {
+  const text =
+    `<AssetDeclaration>` +
+    `<CreateObject>  CrateDebris_01  </CreateObject>` +
+    `</AssetDeclaration>`;
+  const doc = parseXml(text);
+  const el = doc.elements.find((e) => e.name === "CreateObject");
+  const tokenStart = text.indexOf("Crate");
+  const cursor = tokenStart + 3;
+  const token = textContentTokenAt(text, el, cursor);
+  assert.deepEqual(token, {
+    value: "CrateDebris_01",
+    start: tokenStart,
+    end: tokenStart + "CrateDebris_01".length,
+  });
+  // The start tag, closing tag and whitespace-only content are not tokens.
+  assert.equal(textContentTokenAt(text, el, el.start + 1), null);
+  assert.equal(textContentTokenAt(text, el, text.indexOf("</CreateObject") + 1), null);
+  const empty = `<A><B/></A><C>   </C>`;
+  const c = parseXml(empty).elements.find((e) => e.name === "C");
+  assert.equal(textContentTokenAt(empty, c, c.startTagEnd + 1), null);
+});
+
+test("textContentTokenAt works before the closing tag is typed", () => {
+  const text = `<A><B>C`;
+  const doc = parseXml(text);
+  const b = doc.elements.find((e) => e.name === "B");
+  assert.ok(b);
+  assert.equal(b.closeTagStart, -1);
+  const token = textContentTokenAt(text, b, text.length);
+  assert.deepEqual(token, {
+    value: "C",
+    start: text.indexOf("C"),
+    end: text.length,
+  });
+});
+
+test("a typed < in content followed by a closing tag does not swallow it", () => {
+  // In a real file the "<" the user just typed is followed by
+  // "</CreateObject>" on the next line. The parser must NOT treat that
+  // closing tag's ">" as the end of the malformed start tag (which would
+  // create a bogus empty-name element and break content completion).
+  const text =
+    `<AssetDeclaration>` +
+    `<ObjectCreationList>` +
+    `<CreateObject>\n\t<Offset/>\n\t<\n</CreateObject>` +
+    `</ObjectCreationList>` +
+    `</AssetDeclaration>`;
+  const doc = parseXml(text);
+  assert.ok(doc.errors.some((e) => /Unterminated start tag/.test(e.message)));
+  assert.ok(!doc.elements.some((e) => e.name === ""), "no bogus empty-name element");
+  const co = doc.elements.find((e) => e.name === "CreateObject");
+  assert.ok(co, "outer CreateObject still parsed");
+  assert.equal(co.end, text.indexOf("</CreateObject>") + "</CreateObject>".length);
+});
+
+test("a partial child name in content is recovered, not glued to the closing tag", () => {
+  const text = `<A><B>\n\t<Cr\n</B></A>`;
+  const doc = parseXml(text);
+  const cr = doc.elements.find((e) => e.name === "Cr");
+  assert.ok(cr, "partial name is recovered as an element shell");
+  assert.equal(cr.recoveredStartTag, true);
+  // The mismatched closing tag later closes the recovered shell (parser
+  // recovery), so the element stays a valid container for completion.
+  assert.equal(cr.closeTagStart, text.indexOf("</B>"));
+  assert.ok(cr.end > cr.startTagEnd);
+  const b = doc.elements.find((e) => e.name === "B");
+  assert.equal(b.end, text.length);
 });

@@ -2,7 +2,7 @@
   "name": "ra3-mod-xml",
   "displayName": "RA3 Mod XML",
   "description": "Red Alert 3 Mod XML tooling: syntax highlighting, completions, reference navigation and diagnostics for SAGE/BinaryAssetBuilder XML.",
-  "version": "0.1.13",
+  "version": "0.1.15",
   "publisher": "ra3-mod-xml",
   "license": "MIT",
   "engines": {

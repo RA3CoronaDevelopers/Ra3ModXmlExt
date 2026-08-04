@@ -7,8 +7,10 @@ import * as model from "../model/schemaModel";
 import type { ModWorkspace } from "../workspace";
 import type { ModIndex } from "../indexer/types";
 import {
+  isReferenceContentType,
   isReferenceAttributeOfType,
   mergeLocalAndGlobalDefs,
+  resolveContentReferenceTargets,
   resolveReferenceTargetsForType,
 } from "../indexer/refs";
 import type { LogicalElement } from "../indexer/logicalTree";
@@ -198,6 +200,7 @@ export class Ra3Diagnostics {
             provisional,
           );
         }
+        this.checkContentReferences(el, elType, document, idx, diags, provisional);
       }
 
       // Include-specific checks.
@@ -308,6 +311,82 @@ export class Ra3Diagnostics {
       : attrRef?.isRef
         ? "of the expected declared type"
         : "matching";
+    const code = provisional ? "unresolved-reference-indexing" : "unresolved-reference";
+    const baseMessage = anyDef
+      ? `Reference "${value}" has no definition ${expected} (ids with the same name exist for other types)`
+      : `Unresolved reference "${value}" (not found in the current index)`;
+    diags.push(
+      this.diag(
+        range,
+        provisional
+          ? `${baseMessage} (index incomplete — may be a false positive)`
+          : baseMessage,
+        severity === "warning"
+          ? vscode.DiagnosticSeverity.Warning
+          : vscode.DiagnosticSeverity.Information,
+        code,
+      ),
+    );
+  }
+
+  private checkContentReferences(
+    el: XmlElement,
+    elType: string | null,
+    document: vscode.TextDocument,
+    idx: ModIndex | null,
+    diags: vscode.Diagnostic[],
+    provisional: boolean,
+  ): void {
+    // Only simple-content elements carry a text value; complex elements'
+    // "content" is child markup and must not be scanned for value refs.
+    const info = elType ? model.typeInfo(elType) : undefined;
+    if (info?.kind !== "simple") return;
+    if (el.selfClosing || el.closeTagStart < 0) return;
+    const text = document.getText();
+    const raw = text.slice(el.startTagEnd, el.closeTagStart);
+    const value = raw.trim();
+    if (!value) return;
+    const valueStart = el.startTagEnd + raw.indexOf(value);
+    const range = new vscode.Range(
+      document.positionAt(valueStart),
+      document.positionAt(valueStart + value.length),
+    );
+
+    // Undefined $DEFINE references.
+    const defineRe = /\$([A-Za-z_][A-Za-z0-9_]*)/g;
+    let m: RegExpExecArray | null;
+    while ((m = defineRe.exec(value)) !== null) {
+      if (
+        idx &&
+        !(
+          idx.local?.defines.has(m[1].toLowerCase()) ??
+          idx.defines.has(m[1].toLowerCase())
+        )
+      ) {
+        const code = provisional ? "undefined-define-indexing" : "undefined-define";
+        diags.push(
+          this.diag(
+            range,
+            `Undefined define "$${m[1]}"` +
+              (provisional ? " (index incomplete — may be a false positive)" : ""),
+            vscode.DiagnosticSeverity.Warning,
+            code,
+          ),
+        );
+      }
+    }
+
+    if (value.startsWith("$") || value.startsWith("=")) return;
+    const severity = this.ws.settings.reportUnresolvedReferences;
+    if (severity === "none" || !idx) return;
+    if (!isReferenceContentType(elType)) return;
+    const targets = resolveContentReferenceTargets(idx, elType, value);
+    if (targets.length) return;
+    const anyDef =
+      (idx.local?.assetsById.has(value.toLowerCase()) ?? false) ||
+      idx.assetsById.has(value.toLowerCase());
+    const refType = info.refType;
+    const expected = refType ? `of type \`${refType}\`` : "of the expected declared type";
     const code = provisional ? "unresolved-reference-indexing" : "unresolved-reference";
     const baseMessage = anyDef
       ? `Reference "${value}" has no definition ${expected} (ids with the same name exist for other types)`

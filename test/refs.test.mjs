@@ -8,6 +8,8 @@ import {
   isLocalReferenceAttribute,
   isReferenceAttribute,
   isReferenceAttributeOfType,
+  isReferenceContentType,
+  resolveContentReferenceTargets,
   resolveReferenceTargets,
   resolveReferenceTargetsForType,
 } from "../out/indexer/refs.js";
@@ -241,4 +243,60 @@ test("xi:include elements are outside the XSD model and unvalidated", () => {
   for (const a of inc.attrs) {
     assert.equal(model.isXsdAttributeName(a.name), true, a.name);
   }
+});
+
+test("typed simple content resolves like a typed attribute reference", () => {
+  // <CreateObject>CrateDebris_01</CreateObject> uses GameObjectWeakRef:
+  // the content is a GameObject reference, not a child element.
+  assert.equal(isReferenceContentType("GameObjectWeakRef"), true);
+  const idx = {
+    assetsById: new Map([
+      [
+        "cratedebris_01",
+        [
+          {
+            type: "GameObject",
+            id: "CrateDebris_01",
+            file: "Crates.xml",
+            line: 2,
+            origin: "project",
+          },
+          {
+            type: "WeaponTemplate",
+            id: "CrateDebris_01",
+            file: "Weapons.xml",
+            line: 4,
+            origin: "project",
+          },
+        ],
+      ],
+    ]),
+    assets: new Map(),
+    projectDir: ".",
+    sdkDir: ".",
+    defines: new Map(),
+    files: new Map(),
+    streams: [],
+    manifests: new Map(),
+    sourceCandidates: [],
+    diagnostics: [],
+    stats: {},
+  };
+  const targets = resolveContentReferenceTargets(idx, "GameObjectWeakRef", "CrateDebris_01");
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].def.type, "GameObject");
+});
+
+test("untyped and pipeline-local content is not a global reference", () => {
+  // Generic AssetReference content is used for shader constants and model
+  // sub-object names, not global asset ids; Poid is pipeline-local.
+  assert.equal(isReferenceContentType("AssetReference"), false);
+  assert.equal(isReferenceContentType("Poid"), false);
+  assert.equal(isReferenceContentType("string"), false);
+  const idx = { assetsById: new Map(), assets: new Map(), defines: new Map() };
+  assert.equal(
+    resolveContentReferenceTargets(idx, "AssetReference", "Anything").length,
+    0,
+  );
+  assert.equal(resolveContentReferenceTargets(idx, "Poid", "Anything").length, 0);
 });

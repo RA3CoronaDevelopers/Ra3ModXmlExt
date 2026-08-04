@@ -6,7 +6,7 @@
 
 - **语法高亮**：在普通 XML 高亮之上叠加领域标记（`$DEFINE` 常量、`inheritFrom`、`xai:joinAction`、结构标签）；XML 语法异常（如未闭合引号）期间由语义 token 兜底，标签/属性/值着色不中断。
 - **自动补全**：
-  - 元素名：按当前父元素的 XSD 模型补全子元素；顶层资产（`AssetDeclaration` 内）补全 `GameObject`、`WeaponTemplate` 等 295 种类型。
+  - 元素名：按当前父元素的 XSD 模型补全子元素；顶层资产（`AssetDeclaration` 内）补全 `GameObject`、`WeaponTemplate` 等 295 种类型。已输入 `<` 时补全保留该 `<`、只替换名称区（不会出现 `<<`）；需要填文本的 simple-content 元素（如 `<CreateObject>`）补全为 `<CreateObject>$1</CreateObject>` 并自动弹出值补全，而不是无法填值的自闭合标签。
   - 属性名：必填属性优先，附带类型/文档/默认值；自动提示 `xai:joinAction` 与 `xmlns:xai`。接受补全时自动避免与上一个属性贴在一起，并按文件已有的排版补空格或换行（换行的基础缩进由编辑器提供，插件不再内嵌缩进以免叠加）；数字/角度/时间等标量属性直接填入 XSD 默认值或类型示例（如 `0d`、`0s`），引用/枚举/布尔等保留真正的 `$1` 占位符并弹出值补全。
   - 属性值：
     - 引用型属性（如 `CommandSet`、`Weapon`）按 `xas:refType` 补全对应类型的资产 ID（**同名 ID 只补全匹配类型**）；
@@ -14,15 +14,19 @@
     - 枚举与位标志列表（如 `Include type`、`LocomotorTemplate@Surfaces`、`KindOf`；列表值在空格后自动继续补全下一项，已使用的 flag 不再重复推荐，闭合值末尾可直接追加新 flag）；
     - 布尔值、`$DEFINE` 常量；
     - `<Include source>` 补全可解析的 `DATA:` / `ART:` / `AUDIO:` 与项目相对路径。
+  - 元素文本内容：simple-content 引用元素（如 `<CreateObject>`、`<RequiredUpgrade>`、`<SpawnTemplate>`）直接在标签间补全对应类型的资产 ID（`GameObjectWeakRef` → GameObject）、枚举或 `$DEFINE`。
+    接受片段后的 `$1` 光标位置会立即弹出值补全，而不是属性名；引用列表超过
+    400 条时标记为不完整，继续输入会重新请求，因此 `CrateDebris_01` 这类排在
+    列表后部的 id 不会因首屏截断而消失。
 - **悬停提示**：元素/属性显示 XSD 文档、类型、必填/默认值；引用值显示定义位置；`$DEFINE` 显示值与定义位置；`Include source` / `xi:include href` 显示解析后的目标文件；`xi:include` 元素与属性给出 XInclude 说明。
-- **引用导航**：从引用值（`CommandSet="..."`、`Weapon="..."`、`inheritFrom`）跳转到定义（严格按引用类型过滤，候选由 `ra3modxml.definitionMode` 控制：`all` 列出 mod + 原版、`project-only` 优先项目内定义）；`Ctrl+点击` Include / `xi:include href` 打开目标文件；Find All References 搜索整个工作区；文档大纲列出顶层资产与 `$DEFINE`。
+- **引用导航**：从引用值（`CommandSet="..."`、`Weapon="..."`、`inheritFrom`、`<CreateObject>ID</CreateObject>` 等元素文本）跳转到定义（严格按引用类型过滤，候选由 `ra3modxml.definitionMode` 控制：`all` 列出 mod + 原版、`project-only` 优先项目内定义）；`Ctrl+点击` Include / `xi:include href` 打开目标文件；Find All References 同时搜索属性值与元素文本内容；文档大纲列出顶层资产与 `$DEFINE`。
 - **当前文档局部作用域（T1）**：即使一个文件不在任何全局流里（没有从
   `Data/Mod.xml` / `additionalmaps` 可达），插件也会按当前文件自身的资产、
   `$DEFINE` 及其 include 链建立局部索引。`xi:include` 会在逻辑树中展开，
   使 include 进来的内容获得正确的父上下文；`AttachModuleId` / `ModuleId` /
   `AutoResolveBody` 等管线局部（Poid）引用可以补全、悬停与跳转到同一
   GameObject 内的模块（含通过 `xi:include` 拼入的兄弟模块）。
-- **错误检查**：XML 格式错误、未知元素/属性（`xi:` 等外来命名空间不误报）、顶层资产缺 `id`、重复 ID、未解析引用（含类型不匹配）、Include / 嵌套 `xi:include` 目标找不到、`$DEFINE` 未定义。
+- **错误检查**：XML 格式错误、未知元素/属性（`xi:` 等外来命名空间不误报）、顶层资产缺 `id`、重复 ID、未解析引用（含属性值与元素文本内容、类型不匹配）、Include / 嵌套 `xi:include` 目标找不到、`$DEFINE` 未定义。
 - **manifest 支持**：`<Include type="reference">` 指向的 `static/global/audio.manifest`（SDK `builtmods`）会被解析，manifest 中的原版资产 ID 可用于补全/悬停/导航/诊断。
 - **美术资产（`.w3x`）**：`W3X.xml` / `ART:` include 链中的 `.w3x` 模型文件会被
   索引（`W3DContainer` / `W3DMesh` / `W3DHierarchy` 等顶层资产），因此

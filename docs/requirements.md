@@ -41,9 +41,15 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
      - 枚举值（XSD `xs:enumeration`）；
      - `$DEFINE` 常量（如 `$CIV_HEALTH_SMALL`）；
      - `<Include source>` 补全可解析的文件路径（`DATA:` / `ART:` / `AUDIO:`）。
+   - **元素文本内容（simple content）**：带 `xas:refType` 的简单内容元素
+     （如 `<CreateObject>ID</CreateObject>`）在标签间补全对应类型的资产 ID、
+     枚举或 `$DEFINE`；补全出的 simple-content 元素必须是可填值的成对标签
+     （`<Name></Name>`），且内容区已输入 `<` 时不得产生 `<<`。
 3. **引用提示（Hover）**：元素/属性悬停显示 XSD 文档、类型、默认值；资产 ID 悬停显示定义位置；`$DEFINE` 悬停显示值与定义位置。
+   - 元素文本内容（simple content 引用）悬停同样显示定义位置。
 4. **引用导航**：
    - 从引用型属性值跳转到对应资产定义（Go to Definition）；
+   - 从 simple-content 引用元素（`<CreateObject>ID</CreateObject>`）的文本跳转到对应资产定义；
    - 查找某资产 ID 的所有引用（Find All References）；
    - `<Include source>` / `xi:include href` 直接打开目标文件；
    - `inheritFrom` 跳转到被继承元素；
@@ -54,6 +60,7 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
    - 缺失必填 `id`（顶层资产）；
    - 重复 ID（同类型 + 同 id，mod 文件之间；覆盖原版 SageXml 不算冲突）；
    - 引用未解析（引用了不存在的资产 ID，可配置是否忽略原版 manifest 中的 ID）；
+   - simple-content 引用元素的文本未解析（同属性引用规则，仅带 refType 的类型）。
    - `<Include>` 目标文件找不到、Include 循环；
    - `$DEFINE` 未定义。
 

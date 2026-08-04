@@ -1,12 +1,15 @@
 import * as vscode from "vscode";
-import { findElementAt } from "../language/xmlParser";
+import { findElementAt, textContentTokenAt } from "../language/xmlParser";
 import { resolveElementType } from "../language/typeContext";
 import * as model from "../model/schemaModel";
 import type { ModWorkspace } from "../workspace";
 import {
   isLocalReferenceAttribute,
   isReferenceAttributeOfType,
+  isReferenceContentType,
+  resolveContentReferenceTargets,
   resolveReferenceTargetsForType,
+  type ReferenceTarget,
 } from "../indexer/refs";
 import {
   findContainingGameObject,
@@ -27,6 +30,7 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
   ): Promise<vscode.Hover | null> {
     if (!this.ws.isRa3Workspace()) return null;
     const offset = document.offsetAt(position);
+    const text = document.getText();
     const scope = await this.ws.getScope(document);
     const doc = scope.expanded;
     const el = findElementAt(doc, offset);
@@ -44,6 +48,12 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       if (attr.hasValue && offset >= attr.valueStart && offset <= attr.valueEnd) {
         return this.valueHover(el, elType, attr.name, attr.value, document, scope);
       }
+    }
+    // Element text content (e.g. <CreateObject>CrateDebris_01</CreateObject>).
+    const contentToken = textContentTokenAt(text, el, offset);
+    if (contentToken) {
+      const h = this.contentHover(elType, contentToken.value, document, scope);
+      if (h) return h;
     }
     // Element name.
     const nameStart = el.start + 1;
@@ -134,14 +144,8 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       const defs =
         idx.local?.defines.get(defineMatch[1].toLowerCase()) ??
         idx.defines.get(defineMatch[1].toLowerCase());
-      if (defs?.length) {
-        const d = defs[0];
-        md.appendMarkdown(`**Define** \`$${d.name}\`  \n`);
-        md.appendCodeblock(d.value);
-        const rel = relativePath(document, d.file);
-        md.appendMarkdown(`Defined in \`${rel}:${d.line}\``);
-        return new vscode.Hover(md);
-      }
+      const h = this.defineHover(defs, document);
+      if (h) return h;
     }
 
     // Include source.
@@ -196,18 +200,7 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     {
       if (!isReferenceAttributeOfType(elType, attrName)) return null;
       const targets = resolveReferenceTargetsForType(idx, elType, attrName, value);
-      if (targets.length) {
-        const md2 = new vscode.MarkdownString();
-        md2.appendMarkdown(`**${targets.length} definition${targets.length > 1 ? "s" : ""}**  \n`);
-        for (const { def: d } of targets.slice(0, 8)) {
-          const loc =
-            d.origin === "manifest"
-              ? `manifest \`${d.manifestSource ?? d.file}\``
-              : `\`${relativePath(document, d.file)}:${d.line}\``;
-          md2.appendMarkdown(`- \`${d.type}\` · ${loc}  \n`);
-        }
-        return new vscode.Hover(md2);
-      }
+      if (targets.length) return this.definitionsHover(targets, document);
       const attrRef = model
         .attributesOfType(elType)
         .find((a) => a.name === attrName);
@@ -216,12 +209,81 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
         : attrRef?.isRef
           ? " of the expected declared type"
           : "";
-      md.appendMarkdown(
-        `No matching definition${expected} in the current index` +
-          " (may exist in a compiled manifest or vanilla data).",
-      );
+      return this.noDefinitionHover(expected);
+    }
+  }
+
+  /**
+   * Hover for text inside a simple-content element whose type is a typed
+   * asset reference (e.g. <CreateObject> with GameObjectWeakRef).
+   */
+  private contentHover(
+    elType: string | null,
+    value: string,
+    document: vscode.TextDocument,
+    scope: DocumentScope,
+  ): vscode.Hover | null {
+    const idx = scope.merged;
+    const defineMatch = /\$([A-Za-z_][A-Za-z0-9_]*)/.exec(value);
+    if (defineMatch && idx) {
+      const defs =
+        idx.local?.defines.get(defineMatch[1].toLowerCase()) ??
+        idx.defines.get(defineMatch[1].toLowerCase());
+      const h = this.defineHover(defs, document);
+      if (h) return h;
+    }
+    if (!isReferenceContentType(elType)) return null;
+    if (!idx) {
+      const md = new vscode.MarkdownString();
+      md.appendMarkdown("Index is still building — references cannot be resolved yet.");
       return new vscode.Hover(md);
     }
+    const targets = resolveContentReferenceTargets(idx, elType, value);
+    if (targets.length) return this.definitionsHover(targets, document);
+    const info = elType ? model.typeInfo(elType) : undefined;
+    const refType = info?.kind === "simple" ? info.refType : null;
+    return this.noDefinitionHover(
+      refType ? ` of type \`${refType}\`` : " of the expected declared type",
+    );
+  }
+
+  private defineHover(
+    defs: { name: string; value: string; file: string; line: number }[] | undefined,
+    document: vscode.TextDocument,
+  ): vscode.Hover | null {
+    if (!defs?.length) return null;
+    const d = defs[0];
+    const md = new vscode.MarkdownString();
+    md.appendMarkdown(`**Define** \`$${d.name}\`  \n`);
+    md.appendCodeblock(d.value);
+    const rel = relativePath(document, d.file);
+    md.appendMarkdown(`Defined in \`${rel}:${d.line}\``);
+    return new vscode.Hover(md);
+  }
+
+  private definitionsHover(
+    targets: ReferenceTarget[],
+    document: vscode.TextDocument,
+  ): vscode.Hover {
+    const md2 = new vscode.MarkdownString();
+    md2.appendMarkdown(`**${targets.length} definition${targets.length > 1 ? "s" : ""}**  \n`);
+    for (const { def: d } of targets.slice(0, 8)) {
+      const loc =
+        d.origin === "manifest"
+          ? `manifest \`${d.manifestSource ?? d.file}\``
+          : `\`${relativePath(document, d.file)}:${d.line}\``;
+      md2.appendMarkdown(`- \`${d.type}\` · ${loc}  \n`);
+    }
+    return new vscode.Hover(md2);
+  }
+
+  private noDefinitionHover(expected: string): vscode.Hover {
+    const md = new vscode.MarkdownString();
+    md.appendMarkdown(
+      `No matching definition${expected} in the current index` +
+        " (may exist in a compiled manifest or vanilla data).",
+    );
+    return new vscode.Hover(md);
   }
 
   private localIdHover(

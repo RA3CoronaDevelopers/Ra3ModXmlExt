@@ -2,6 +2,8 @@ import {
   attributesOfType,
   elementTypeName,
   isAssignableTo,
+  typeChain,
+  typeInfo,
 } from "../model/schemaModel";
 import type { AssetDef, ModIndex } from "./types";
 
@@ -117,6 +119,56 @@ export function resolveReferenceTargetsForType(
     refType = attr.refType;
   }
 
+  return filterAndScoreDefs(defs, refType, selfType);
+}
+
+/**
+ * True when an element's text content is a typed reference to a global
+ * asset: the element's resolved XSD type is a simple type carrying an
+ * `xas:refType` (e.g. `<CreateObject>` with `GameObjectWeakRef`).
+ *
+ * Only *typed* refs are treated as content references. Generic untyped
+ * `AssetReference` content is used by real data for shader constants,
+ * mesh sub-object names and other values that are not global asset ids
+ * (`FXShaderConstantTexture@Value`, `RenderSubObjectReference@Mesh`), so
+ * resolving those globally would produce false hover/navigation/diagnostics.
+ * Poid pipeline-local ids are excluded for the same reason.
+ */
+export function isReferenceContentType(typeName: string | null): boolean {
+  if (!typeName) return false;
+  const info = typeInfo(typeName);
+  if (info?.kind !== "simple") return false;
+  if (typeChain(typeName).includes("Poid")) return false;
+  return info.refType != null;
+}
+
+/**
+ * Resolves the definitions an element's text content should point to,
+ * filtered by the element type's `xas:refType`
+ * (e.g. `GameObjectWeakRef` -> `GameObject`).
+ */
+export function resolveContentReferenceTargets(
+  idx: ModIndex,
+  typeName: string | null,
+  id: string,
+): ReferenceTarget[] {
+  if (!isReferenceContentType(typeName)) return [];
+  if (!typeName) return [];
+  const defs = mergeLocalAndGlobalDefs(
+    idx.local?.assetsById.get(id.toLowerCase()),
+    idx.assetsById.get(id.toLowerCase()),
+  );
+  if (!defs.length) return [];
+  const info = typeInfo(typeName);
+  const refType = info?.kind === "simple" ? info.refType : null;
+  return filterAndScoreDefs(defs, refType, null);
+}
+
+function filterAndScoreDefs(
+  defs: readonly AssetDef[],
+  refType: string | null,
+  selfType: string | null,
+): ReferenceTarget[] {
   const targets: ReferenceTarget[] = [];
   for (const def of defs) {
     if (refType && !isAssignableTo(def.type, refType)) continue;

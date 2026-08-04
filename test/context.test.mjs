@@ -74,6 +74,38 @@ test("cursor after a closed quote is an attribute-name context", () => {
   assert.equal(ctx.attr, null);
 });
 
+test("cursor exactly after an opening tag with a closing tag is content", () => {
+  const text = `<CreateObject></CreateObject>`;
+  const cursor = text.indexOf(">") + 1;
+  const doc = parseXml(text);
+  const ctx = analyzeContext(doc, text, cursor);
+  assert.equal(ctx.kind, "content");
+  assert.equal(ctx.element?.name, "CreateObject");
+});
+
+test("cursor after a typed > but before the closing tag is content too", () => {
+  const text = `<CreateObject>`;
+  const cursor = text.length;
+  const doc = parseXml(text);
+  const ctx = analyzeContext(doc, text, cursor);
+  assert.equal(ctx.kind, "content");
+  assert.equal(ctx.element?.name, "CreateObject");
+});
+
+test("cursor after a closed child element belongs to the parent content", () => {
+  const text =
+    `<AssetDeclaration>` +
+    `<ObjectCreationList>` +
+    `<CreateObject>X</CreateObject>` +
+    `</ObjectCreationList>` +
+    `</AssetDeclaration>`;
+  const cursor = text.indexOf("</CreateObject>") + "</CreateObject>".length;
+  const doc = parseXml(text);
+  const ctx = analyzeContext(doc, text, cursor);
+  assert.equal(ctx.kind, "content");
+  assert.equal(ctx.element?.name, "ObjectCreationList");
+});
+
 test("splitListValuePrefix isolates the token being edited", () => {
   assert.deepEqual(splitListValuePrefix("GROUND WA"), { token: "WA", start: 7 });
   assert.deepEqual(splitListValuePrefix("GROUND "), { token: "", start: 7 });

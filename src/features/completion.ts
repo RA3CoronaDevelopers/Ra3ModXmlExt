@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import type { XmlAttribute, XmlElement } from "../language/xmlParser";
+import { textContentTokenAt } from "../language/xmlParser";
 import {
   analyzeContext,
   splitListValuePrefix,
@@ -7,7 +8,7 @@ import {
 } from "../language/context";
 import { resolveElementType } from "../language/typeContext";
 import * as model from "../model/schemaModel";
-import type { AttributeInfo } from "../model/schemaModel";
+import type { AttributeInfo, SimpleTypeInfo } from "../model/schemaModel";
 import { isLocalReferenceAttribute } from "../indexer/refs";
 import {
   findContainingGameObject,
@@ -26,7 +27,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     document: vscode.TextDocument,
     position: vscode.Position,
     _token: vscode.CancellationToken,
-  ): Promise<vscode.CompletionItem[]> {
+  ): Promise<vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem>> {
     if (!this.ws.isRa3Workspace()) return [];
     const text = document.getText();
     const offset = document.offsetAt(position);
@@ -61,10 +62,12 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     const names = this.childrenOf(parent);
     if (!names.length) return [];
 
+    // The "<" already exists at the element's start: replace only the name
+    // area and insert the tag body WITHOUT a leading "<", otherwise the
+    // range text ("<") would also be used as the filter prefix and hide
+    // every suggestion.
     const start = ctx.element
-      ? document.offsetAt(
-          document.positionAt(ctx.element.start + (ctx.closing ? 2 : 1)),
-        )
+      ? ctx.element.start + (ctx.closing ? 2 : 1)
       : document.offsetAt(position);
     const range = new vscode.Range(document.positionAt(start), position);
     const items: vscode.CompletionItem[] = [];
@@ -79,7 +82,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         (type ? `Type: ${type}` : "");
       item.documentation = docText ? new vscode.MarkdownString(docText) : undefined;
       item.detail = type ? `RA3 XML · ${type}` : "RA3 XML";
-      item.insertText = this.elementSnippet(child.name, type);
+      item.insertText = this.elementSnippet(child.name, type, ctx.element == null);
       items.push(item);
     }
     return items;
@@ -103,16 +106,27 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     return [];
   }
 
-  private elementSnippet(name: string, type: string | null): vscode.SnippetString {
+  private elementSnippet(
+    name: string,
+    type: string | null,
+    includeOpenBracket = true,
+  ): vscode.SnippetString {
+    const open = includeOpenBracket ? "<" : "";
     if (model.isTopLevelElement(name)) {
-      return new vscode.SnippetString(`<${name} id="$1">\n\t$0\n</${name}>`);
+      return new vscode.SnippetString(`${open}${name} id="$1">\n\t$0\n</${name}>`);
     }
     const info = type ? model.typeInfo(type) : undefined;
+    // Simple types hold text content (asset id / enum / define / string), so
+    // they need an explicit closing tag and a value placeholder instead of a
+    // self-closing tag that can never contain a value.
+    if (info?.kind === "simple") {
+      return new vscode.SnippetString(`${open}${name}>$1</${name}>`);
+    }
     const hasChildren = info?.kind === "complex" && info.children.length > 0;
     if (hasChildren) {
-      return new vscode.SnippetString(`<${name}>\n\t$0\n</${name}>`);
+      return new vscode.SnippetString(`${open}${name}>\n\t$0\n</${name}>`);
     }
-    return new vscode.SnippetString(`<${name} />`);
+    return new vscode.SnippetString(`${open}${name} />`);
   }
 
   // ── Attribute name ────────────────────────────────────────────────
@@ -238,7 +252,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     document: vscode.TextDocument,
     position: vscode.Position,
     idx: ModIndex | null,
-  ): vscode.CompletionItem[] {
+  ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const el = ctx.element;
     const attr = ctx.attr;
     if (!el || !attr) return [];
@@ -358,7 +372,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
    * (" FLAG") so flags can be appended to an already-closed value.
    */
   private listEnumItems(
-    attrInfo: AttributeInfo,
+    attrInfo: { enumValues: string[]; type?: string | null },
     rawPrefix: string,
     seg: { token: string; start: number },
     valueRange: vscode.Range,
@@ -410,18 +424,18 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     idx: ModIndex,
     prefix: string,
     make: (label: string, kind: vscode.CompletionItemKind, detail: string, doc?: string) => vscode.CompletionItem,
-  ): vscode.CompletionItem[] {
+  ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const lower = prefix.toLowerCase();
-    const candidates = idx.sourceCandidates
-      .filter((c) => c.source.toLowerCase().includes(lower))
-      .slice(0, MAX_VALUE_ITEMS);
+    const candidates = idx.sourceCandidates.filter((c) =>
+      c.source.toLowerCase().includes(lower),
+    );
     const priority: Record<string, number> = { "": 0, DATA: 1, ART: 2, AUDIO: 3 };
     candidates.sort(
       (a, b) =>
         (priority[a.prefix ?? ""] ?? 4) - (priority[b.prefix ?? ""] ?? 4) ||
         a.source.localeCompare(b.source),
     );
-    return candidates.map((c) => {
+    const items = candidates.map((c) => {
       const item = make(c.source, vscode.CompletionItemKind.File, "Include source");
       item.detail = c.path;
       item.documentation = new vscode.MarkdownString(
@@ -429,6 +443,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       );
       return item;
     });
+    return this.limitItems(items, items.length);
   }
 
   private assetIdItems(
@@ -437,7 +452,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     refType: string | null,
     prefix: string,
     make: (label: string, kind: vscode.CompletionItemKind, detail: string, doc?: string) => vscode.CompletionItem,
-  ): vscode.CompletionItem[] {
+  ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const lower = prefix.toLowerCase();
     const scored: { def: AssetDef; score: number }[] = [];
     const seen = new Set<string>();
@@ -451,6 +466,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       if (refType && model.isAssignableTo(def.type, refType)) score = 1;
       if (selfType && model.isAssignableTo(def.type, selfType)) score = 0;
       if (def.origin === "project") score -= 0.2;
+      if (def.stream === "local") score -= 0.4;
       scored.push({ def, score });
     };
 
@@ -476,8 +492,8 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       }
     }
 
-    scored.sort((a, b) => a.score - b.score || a.def.id.localeCompare(b.def.id));
-    return scored.slice(0, MAX_VALUE_ITEMS).map(({ def }) => {
+    const top = topScoredDefs(scored, MAX_VALUE_ITEMS);
+    const items = top.map(({ def }) => {
       const origin = def.origin === "manifest" ? `manifest (${def.manifestSource ?? ""})` : def.origin;
       const doc = new vscode.MarkdownString();
       doc.appendCodeblock(def.id);
@@ -486,13 +502,14 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       doc.appendMarkdown(`**Origin**: ${origin}`);
       return make(def.id, vscode.CompletionItemKind.Value, `${def.type} · ${origin}`, doc.value);
     });
+    return this.limitItems(items, scored.length);
   }
 
   private defineItems(
     idx: ModIndex,
     prefix: string,
     make: (label: string, kind: vscode.CompletionItemKind, detail: string, doc?: string) => vscode.CompletionItem,
-  ): vscode.CompletionItem[] {
+  ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const lower = prefix.replace(/^[=$]*/, "").toLowerCase();
     const items: vscode.CompletionItem[] = [];
     const seen = new Set<string>();
@@ -510,14 +527,14 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         items.push(item);
       }
     }
-    return items.slice(0, MAX_VALUE_ITEMS);
+    return this.limitItems(items, items.length);
   }
 
   private localIdItems(
     el: LogicalElement,
     prefix: string,
     make: (label: string, kind: vscode.CompletionItemKind, detail: string, doc?: string) => vscode.CompletionItem,
-  ): vscode.CompletionItem[] {
+  ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const root = findContainingGameObject(el);
     if (!root) return [];
     const lower = prefix.toLowerCase();
@@ -533,35 +550,238 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         ),
       );
     }
-    return items;
+    return this.limitItems(items, items.length);
+  }
+
+  /**
+   * VS Code filters the returned items client-side while the user keeps
+   * typing. Once the result is capped, the list must be marked incomplete so
+   * the provider is asked again with the narrower prefix; otherwise a wanted
+   * id (e.g. CrateDebris_01) can be silently cut off behind the first 400
+   * alphabetically-earlier candidates and never reappear.
+   */
+  private limitItems<T extends vscode.CompletionItem>(
+    items: T[],
+    total: number,
+  ): T[] | vscode.CompletionList<T> {
+    if (total <= MAX_VALUE_ITEMS) return items;
+    return new vscode.CompletionList(items.slice(0, MAX_VALUE_ITEMS), true);
   }
 
   // ── Element content ───────────────────────────────────────────────
 
   private contentItems(
     ctx: CompletionContext,
-    _document: vscode.TextDocument,
-    _position: vscode.Position,
-    _idx: ModIndex | null,
-  ): vscode.CompletionItem[] {
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    idx: ModIndex | null,
+  ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const el = ctx.element;
     if (!el) return [];
-    // Reuse element-name suggestions with a plain replacement range.
+    const elType = resolveElementType(el);
+    const info = elType ? model.typeInfo(elType) : undefined;
+
+    // Simple-content element: the text between the tags is the value itself
+    // (e.g. <CreateObject>CrateDebris_01</CreateObject>), so offer value
+    // completions (asset ids / enums / defines) instead of child elements.
+    if (info?.kind === "simple") {
+      return this.simpleContentItems(el, elType, info, document, position, idx);
+    }
+
+    return this.contentChildItems(el, document, position);
+  }
+
+  private simpleContentItems(
+    el: XmlElement,
+    elType: string | null,
+    info: SimpleTypeInfo,
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    idx: ModIndex | null,
+  ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
+    const text = document.getText();
+    const offset = document.offsetAt(position);
+    const token = textContentTokenAt(text, el, offset);
+    const prefix = token ? text.slice(token.start, Math.min(offset, token.end)) : "";
+    const rawPrefix = text.slice(el.startTagEnd, offset);
+    const isList = info.isList === true;
+    const seg = isList
+      ? splitListValuePrefix(rawPrefix)
+      : { token: prefix, start: token ? token.start - el.startTagEnd : 0 };
+    const rangeStart = token ? token.start : offset;
+    const valueRange = new vscode.Range(
+      document.positionAt(rangeStart),
+      document.positionAt(Math.max(rangeStart, offset)),
+    );
+    const make = (
+      label: string,
+      kind: vscode.CompletionItemKind,
+      detail: string,
+      doc?: string,
+      range?: vscode.Range,
+      insertText?: string,
+    ) => {
+      const item = new vscode.CompletionItem(label, kind);
+      item.range = range ?? valueRange;
+      item.insertText = insertText ?? label;
+      item.detail = detail;
+      if (doc) item.documentation = new vscode.MarkdownString(doc);
+      return item;
+    };
+
+    // Typed asset references only (isRef without refType is used by real
+    // data for shader constants / mesh sub-object names, not global ids).
+    if (info.refType) {
+      if (!idx) return [];
+      return this.assetIdItems(idx, null, info.refType, seg.token, make);
+    }
+    if (info.enumValues.length) {
+      if (isList) return this.listEnumItems(info, rawPrefix, seg, valueRange, make);
+      return info.enumValues
+        .filter((v) => v.toLowerCase().startsWith(seg.token.toLowerCase()))
+        .map((v) => make(v, vscode.CompletionItemKind.EnumMember, elType ?? "enum"));
+    }
+    if (idx && info.allowsDefine) {
+      return this.defineItems(idx, seg.token, make);
+    }
+    return [];
+  }
+
+  private contentChildItems(
+    el: XmlElement,
+    document: vscode.TextDocument,
+    position: vscode.Position,
+  ): vscode.CompletionItem[] {
     const elType = resolveElementType(el);
     const names = elType ? model.childrenOfType(elType) : model.childrenOfElement(el.name);
     const items: vscode.CompletionItem[] = [];
+    if (!names.length) return items;
+
+    const text = document.getText();
+    const offset = document.offsetAt(position);
+    // When the user already typed "<" (optionally followed by a partial
+    // name), keep that "<" and replace only the name area; the inserted
+    // snippet then has no leading "<" so the range text stays a valid
+    // filter prefix ("", "Cr", ...) instead of "<" (which would hide every
+    // item). Without a typed "<" the full "<Name>…</Name>" is inserted.
+    const { rangeStart, typedOpen } = contentElementRange(text, offset);
+    const range = new vscode.Range(document.positionAt(rangeStart), position);
+
     for (const child of names) {
       const item = new vscode.CompletionItem(child.name, vscode.CompletionItemKind.Field);
-      item.insertText = this.elementSnippet(child.name, child.type);
+      item.range = range;
+      item.insertText = this.elementSnippet(child.name, child.type, !typedOpen);
       const type = child.type;
       const info = type ? model.typeInfo(type) : undefined;
       item.detail = type ? `RA3 XML · ${type}` : "RA3 XML";
       const doc = child.doc || (info?.kind === "complex" ? info.doc : "");
       if (doc) item.documentation = new vscode.MarkdownString(doc);
+      if (info?.kind === "simple" && this.simpleContentValueKind(info)) {
+        item.command = {
+          command: "editor.action.triggerSuggest",
+          title: "Suggest content value",
+        };
+      }
       items.push(item);
     }
     return items;
   }
+
+  private simpleContentValueKind(info: SimpleTypeInfo): boolean {
+    return (
+      info.refType != null ||
+      info.enumValues.length > 0 ||
+      info.allowsDefine
+    );
+  }
+}
+
+interface ScoredDef {
+  def: AssetDef;
+  score: number;
+}
+
+function compareScoredDefs(a: ScoredDef, b: ScoredDef): number {
+  return a.score - b.score || a.def.id.localeCompare(b.def.id);
+}
+
+/**
+ * Returns the best `limit` scored definitions without sorting the whole
+ * candidate list. A max-heap keeps the worst item of the current top set at
+ * the root, so every additional candidate only needs an O(log limit) check.
+ */
+function topScoredDefs(scored: ScoredDef[], limit: number): ScoredDef[] {
+  if (scored.length <= limit) {
+    scored.sort(compareScoredDefs);
+    return scored;
+  }
+  const better = (a: ScoredDef, b: ScoredDef) => compareScoredDefs(a, b) < 0;
+  const heap: ScoredDef[] = [];
+  const swap = (i: number, j: number) => {
+    const t = heap[i];
+    heap[i] = heap[j];
+    heap[j] = t;
+  };
+  const siftUp = (i: number) => {
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (better(heap[i], heap[parent])) {
+        swap(i, parent);
+        i = parent;
+      } else {
+        break;
+      }
+    }
+  };
+  const siftDown = (i: number) => {
+    for (;;) {
+      const left = i * 2 + 1;
+      const right = left + 1;
+      let worst = i;
+      if (left < heap.length && better(heap[left], heap[worst])) worst = left;
+      if (right < heap.length && better(heap[right], heap[worst])) worst = right;
+      if (worst === i) break;
+      swap(i, worst);
+      i = worst;
+    }
+  };
+  for (const entry of scored) {
+    if (heap.length < limit) {
+      heap.push(entry);
+      siftUp(heap.length - 1);
+    } else if (better(entry, heap[0])) {
+      heap[0] = entry;
+      siftDown(0);
+    }
+  }
+  heap.sort(compareScoredDefs);
+  return heap;
+}
+
+/**
+ * Replacement range for a child-element completion in element content:
+ * - when the user typed "<" (optionally followed by a partial name), the
+ *   "<" is kept and the range covers the name area after it;
+ * - a partial name typed without "<" is replaced as a word;
+ * - whitespace-only content leaves the range empty at the cursor.
+ * Typing a closing tag ("</" / "</Name") never suggests child elements.
+ */
+function contentElementRange(
+  text: string,
+  offset: number,
+): { rangeStart: number; typedOpen: boolean } {
+  let j = offset;
+  while (j > 0 && /[ \t]/.test(text[j - 1])) j--;
+  let i = j;
+  while (i > 0 && /[A-Za-z0-9_:.-]/.test(text[i - 1])) i--;
+  if (i >= 2 && text.slice(i - 2, i) === "</") {
+    return { rangeStart: offset, typedOpen: false };
+  }
+  if (i > 0 && text[i - 1] === "<") {
+    return { rangeStart: i, typedOpen: true };
+  }
+  if (i < j) return { rangeStart: i, typedOpen: false };
+  return { rangeStart: offset, typedOpen: false };
 }
 
 interface AttributeInsertLayout {

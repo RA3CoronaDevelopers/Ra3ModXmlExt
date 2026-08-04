@@ -420,6 +420,13 @@ function findTagEnd(text: string, from: number): number {
       if (c === quote) quote = null;
     } else if (c === '"' || c === "'") {
       quote = c;
+    } else if (c === "<") {
+      // A new tag start before the current tag's ">" means the ">" we would
+      // find later belongs to that other tag (typically a closing tag after
+      // a just-typed "<" in element content). Treat the current tag as
+      // unterminated so the parser recovers at the line break: the context
+      // stays "content" and the completion range can cover the typed "<".
+      return -1;
     } else if (c === ">") {
       return i;
     }
@@ -448,13 +455,81 @@ export function findElementAt(doc: XmlDocument, offset: number): XmlElement | nu
   let best: XmlElement | null = null;
   for (const el of doc.elements) {
     if (el.end < 0) continue;
-    if (offset >= el.start && offset <= el.end) {
+    if (elementContainsOffset(el, offset)) {
       if (!best || el.depth > best.depth) {
         best = el;
       }
     }
   }
   return best;
+}
+
+/**
+ * Whether `offset` belongs to an element's span.
+ *
+ * The end offset is exclusive for a completed element (closing tag or
+ * self-closing tag): a cursor right after `</Name>` belongs to the parent's
+ * content, not the child. The one exception is an unclosed element whose
+ * parser-recovered `end` is the document end: a cursor at EOF is still
+ * inside the element being typed.
+ */
+export function elementContainsOffset(el: XmlElement, offset: number): boolean {
+  if (offset < el.start) return false;
+  if (offset < el.end) return true;
+  if (offset > el.end) return false;
+  return !el.selfClosing && el.closeTagStart < 0;
+}
+
+export interface TextToken {
+  value: string;
+  /** Absolute offset of the first character of the token. */
+  start: number;
+  /** Absolute offset one past the last character of the token. */
+  end: number;
+}
+
+/**
+ * Returns the whitespace-delimited text token inside an element's content
+ * that contains `offset`, with absolute source offsets. Used for
+ * simple-content elements (e.g. `<CreateObject>CrateDebris_01</CreateObject>`)
+ * by completion, hover, navigation and diagnostics. Returns null when the
+ * offset is not inside text content (start tag, closing tag, self-closing).
+ */
+export function textContentTokenAt(
+  text: string,
+  el: XmlElement,
+  offset: number,
+): TextToken | null {
+  if (el.selfClosing) return null;
+  const contentEnd = el.closeTagStart >= 0 ? el.closeTagStart : el.end;
+  if (contentEnd <= el.startTagEnd) return null;
+  if (offset <= el.startTagEnd || offset > contentEnd) return null;
+  const contentStart = el.startTagEnd;
+  // A cursor right before the closing tag is still inside the content; clamp
+  // the relative position to the content length in that case.
+  const rel = Math.min(offset - contentStart, contentEnd - contentStart);
+  let tokenStart = rel;
+  while (tokenStart > 0 && !/\s/.test(text[contentStart + tokenStart - 1])) {
+    tokenStart--;
+  }
+  let tokenEnd = rel;
+  while (
+    tokenEnd < contentEnd - contentStart &&
+    !/\s/.test(text[contentStart + tokenEnd])
+  ) {
+    tokenEnd++;
+  }
+  // The cursor may sit on trailing whitespace or at the closing-tag
+  // boundary; trim whitespace so the token is exactly the value word.
+  while (tokenEnd > tokenStart && /\s/.test(text[contentStart + tokenEnd - 1])) {
+    tokenEnd--;
+  }
+  if (tokenEnd <= tokenStart) return null;
+  return {
+    value: text.slice(contentStart + tokenStart, contentStart + tokenEnd),
+    start: contentStart + tokenStart,
+    end: contentStart + tokenEnd,
+  };
 }
 
 /** Finds an element by name that contains the offset (including its start tag). */

@@ -1,5 +1,5 @@
 import type { XmlAttribute, XmlDocument, XmlElement } from "./xmlParser";
-import { parseTag } from "./xmlParser";
+import { elementContainsOffset, parseTag } from "./xmlParser";
 
 export type ContextKind =
   | "element-name"
@@ -31,15 +31,23 @@ export function analyzeContext(
   let container: XmlElement | null = null;
   for (const el of doc.elements) {
     if (el.end < 0) continue;
-    if (offset >= el.start && offset <= el.end) {
+    if (elementContainsOffset(el, offset)) {
       if (!container || el.depth > container.depth) container = el;
     }
   }
 
   if (!container) return empty("none");
 
-  // Inside the start tag of the element.
-  if (offset >= container.start && offset <= container.startTagEnd) {
+  // Inside the start tag of the element. The boundary right after `>` is the
+  // start of the content (e.g. the `$1` cursor in
+  // `<CreateObject>$1</CreateObject>`), not another attribute slot; only an
+  // unterminated start tag whose `>` has not been typed yet still belongs to
+  // the start tag at its recovered end.
+  const atTagEnd = offset === container.startTagEnd;
+  const tagClosed =
+    atTagEnd && container.startTagEnd > container.start &&
+    text[container.startTagEnd - 1] === ">";
+  if (offset >= container.start && (offset < container.startTagEnd || (atTagEnd && !tagClosed))) {
     return analyzeStartTag(container, text, offset);
   }
 

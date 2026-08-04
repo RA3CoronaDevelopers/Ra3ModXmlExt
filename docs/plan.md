@@ -1,6 +1,6 @@
 # 调研结论与实施计划（已按最新代码同步更新）
 
-> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-04）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）等。
+> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-04）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）、simple-content 元素文本引用（补全 / hover / 跳转 / 诊断 / Find All References）等。
 
 ## 一、调研结论（带证据）
 
@@ -85,7 +85,8 @@ src/
     existence.ts       文件集存在性快照（目录枚举 Set，替代逐路径 statSync）
     manifestParser.ts  .manifest 二进制解析 + 类型/ID 推导（纯 TS）
     fileScanner.ts     目录遍历缓存 + Include source 候选收集
-    refs.ts            引用目标解析（按 refType / isRef / inheritFrom 过滤，纯 TS）
+    refs.ts            引用目标解析（属性 + 元素文本内容，按 refType / isRef /
+                       inheritFrom 过滤，纯 TS）
     shallowScan.ts     大体积美术资产（.w3x 等）顶层浅扫描（纯 TS，不建 DOM）
     records.ts         每文件紧凑索引记录（资产/Define/Include/xi + 行号）
     caches.ts          跨重建持久缓存（DocumentCache / IndexRecordsCache /
@@ -233,6 +234,23 @@ test/
     第一个独占一行的完整属性作为规范缩进，插入换行时顺带吞掉触发补全留下的
     尾随空格；属性名补全改用 `SnippetString`（`$1` 成为真正占位符），并新增
     输出通道调试日志。
+27. **simple-content 元素文本引用（第十六轮，2026-08-04）**：simple type
+    子元素（如 `ObjectCreationList` 内嵌套 `<CreateObject>`，类型
+    `GameObjectWeakRef`）的**标签间文本**就是资产引用。内容区补全现在区分
+    “复杂元素 → 子元素名”与“简单元素 → 值补全”；用户已输入 `<` 时替换范围从
+    `<` 开始，杜绝 `<<`；simple type 元素片段固定为 `<Name>$1</Name>`（可填
+    值）并自动触发值补全。hover / Ctrl 跳转 / 诊断 / Find All References
+    均增加内容 token 分支。只有**带 `xas:refType`** 的 simple 内容按全局引用
+    处理（291 处子元素声明）；无类型 `AssetReference`
+    （`FXShaderConstantTexture@Value`、`RenderSubObjectReference@Mesh` 等
+    真实数据是贴图/子对象名）与 `Poid` 不参与全局解析，避免误报。
+    补充：真实文件中 `<` 后还有 `</…>` 时，`findTagEnd` 曾把闭合标签的 `>` 误
+    当成残缺开始标签的结束，生成空名/半截名伪元素，补全走 element-name 分支
+    导致 `<<`。修复为引号外遇到 `<` 即视为未闭合（行尾恢复），且
+    `elementNameItems` 的替换范围包含 `<`。实机再回归：范围含 `<` 会让 VS Code
+    用 `<` 做过滤前缀导致菜单为空——改为保留已输入的 `<`、range 从 `<` 之后
+    开始、插入文本不带开括号；`textContentTokenAt` 对未闭合元素用 `el.end`
+    作内容边界。
 
 ## 三、实施步骤
 
@@ -278,6 +296,18 @@ test/
     （编辑器自动补基础缩进，避免 3+3=6 式叠加）、完整属性锚点 + 首个独占一行
     属性为规范缩进、`$1` 改为 SnippetString 占位符、输出通道调试日志、尾随
     空格吞除；测试 111 → 113（版本 0.1.12–0.1.13）。
+19. [x] simple-content 文本引用修复（第十六轮，2026-08-04）：`<` 后补全范围
+    覆盖 `<`、simple type 元素片段 `<Name>$1</Name>`、简单元素内容值补全、
+    `refs.ts` 新增 `isReferenceContentType` / `resolveContentReferenceTargets`、
+    hover / 定义跳转 / 诊断 / Find All References 内容分支；
+    测试 113 → 121（版本 0.1.14）。实机回归补充：`findTagEnd` 引号外遇 `<`
+    视为未闭合 + 插入文本不带开括号（range 从 `<` 之后开始）；测试 121 → 125，
+    再回归 125 → 128（未闭合元素内容 token）。
+20. [x] simple-content 零宽边界与大列表补全（第十七轮，2026-08-04）：
+    `>` 后光标归入内容区、已闭合元素 `end` 改为开区间；超过 400 条的
+    id/define/local/include 候选返回 `isIncomplete` 让 VS Code 随输入重请求；
+    当前文档 local 资产优先、候选 top-N 用堆避免全量排序、Include source
+    先排序再截断；测试 128 → 136。
 
 ## 四、验证结果（实测）
 
@@ -300,7 +330,9 @@ test/
 `childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list`
 枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、
 模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中
-manifest 的 `PlayerTemplate`）。
+manifest 的 `PlayerTemplate`）、simple-content 文本引用（`<` 后补全不产生
+`<<`、`<CreateObject>$1</CreateObject>` 片段、内容值按 refType 过滤、
+内容 hover / Ctrl 跳转 / 诊断）。
 
 > 注：D: 盘移动硬盘已恢复连接；Corona 已在第八 / 九轮按上述新数据回归。
 

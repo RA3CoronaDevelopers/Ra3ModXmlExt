@@ -1278,3 +1278,234 @@ VS Code 在插入**含换行的补全文本**时，会给新行套用当前行�
 
 版本 **0.1.11 → 0.1.13**（0.1.12 为中间版本，仅含锚点与尾随空格修复，
 未解决叠加；0.1.13 为最终修复）。
+
+---
+
+## 二十一、问题分析（第十六轮，2026-08-04）：元素文本内容（simple content）引用与 `<<` 补全
+
+### 现象
+
+用户样例（`ObjectCreationList` → `CreateObject` 内输入 `<`）：
+
+1. 补全菜单出现 `CreateObject`，接受后变成 `<<CreateObject />`——两个尖括号
+   非法 XML；
+2. 嵌套 `<CreateObject>` 被补全成自闭合 `<CreateObject />`，无法在标签内填
+   单位的 id；正确写法应是 `<CreateObject>CrateDebris_01</CreateObject>`
+   （原版 `SageXml\GlobalData\ObjectCreationLists.xml` 与 AttachTest
+   `ObjectCreationList.xml` 均为此形态）；
+3. 手动改成 `<CreateObject>C</CreateObject>` 后，内容区不出现 C 开头的
+   GameObject id 补全；
+4. 对 `<CreateObject>CrateDebris_01</CreateObject>` 的文本 hover 与
+   Ctrl+点击导航均无效。
+
+### 根因（三个独立缺陷叠加）
+
+**A. 内容区补全没有处理“用户已输入 `<`”**
+
+`<` 是补全触发字符（`extension.ts`）。`completion.ts` 的 `contentItems`
+返回子元素候选时既不设置 `range`，`insertText` 又是完整的 `<Name…>`，VS Code
+就把完整标签**追加**在已输入的 `<` 后面 → `<<Name />`。影响所有内容区子元素
+补全（`Offset`、`RequiredUpgrade` 等同样中招），不只 `CreateObject`。
+
+**B. `elementSnippet` 不知道“simple type 元素要填文本”**
+
+XSD 中 `CreateObjectNugget` 明确声明
+`<xs:element name="CreateObject" type="GameObjectWeakRef"/>`；`GameObjectWeakRef`
+是 simple type，标签内容是 GameObject id。`elementSnippet` 只区分顶层 / 有子
+元素的复杂类型 / 其他，simple type 落入 `<Name />` 分支，于是生成了永远填不了
+值的自闭合标签。
+
+**C. 所有 feature 都只认属性值，不认元素文本内容**
+
+- `contentItems` 对 simple type 元素查“子元素列表”得到空 → 内容区无补全；
+- `hover` 只检查属性名/属性值/元素名，文本区间不返回任何结果；
+- `provideDefinition` 找不到属性直接 `return null`；
+- `checkValueReferences` 只对属性做未解析引用检查；
+- Find All References 的正则只匹配 `["']id["']`。
+
+### 类似情况盘点（模型统计）
+
+XSD 模型中共 **371 处“子元素是 simple type”的声明（149 个不同元素名）**：
+
+| 类别 | 数量 | 例子 |
+|---|---|---|
+| 带 `xas:refType` 的引用内容 | 291 | `CreateObject`→GameObject、`RequiredUpgrade`/`ForbiddenUpgrade`→UpgradeTemplate、`SpawnTemplate`→GameObject、`Filename`→AudioFile、`RequiredObject`→GameObject |
+| 无类型 `AssetReference`（isRef 无 refType） | 9 | `FXShaderConstantTexture@Value`、`RenderSubObjectReference@Mesh/CollisionBox` |
+| 枚举内容 | 22 | `SourceMustNotHaveBeenDisabledThisFrameByType` 等 |
+| 允许 `$DEFINE` 的内容 | 22 | 各类数值内容 |
+| 普通字符串 | 27 | `DisplayName` 等 |
+
+关键取证：`FXShaderConstantTexture@Value` 在真实 XML 里填的是**贴图名、数值、
+布尔**（如 `AUMCV`、`1.000000`、`false`），`RenderSubObjectReference@Mesh`
+在 w3x 里填的是**同一模型文件内的子对象名**——它们虽然被 XSD 标成
+`AssetReference`（isRef），却不是全局资产 ID。因此**只有带 refType 的 simple
+内容**才按全局引用处理；无类型 `AssetReference` 与 `Poid` 一律不参与全局
+补全 / hover / 跳转 / 诊断，避免误报。
+
+### 修复
+
+1. **内容区 `<` 处理**（`completion.ts`）：`contentChildItems` 检测光标前是否
+   已有 `<`（可带半截名字），有则把替换范围起点设为该 `<`，接受完整
+   `<Name…>` 片段时是“替换”而非“追加”，从根上消灭 `<<`；`</` 输入不触发子元素
+   补全。
+2. **simple type 元素片段**：`elementSnippet` 对 simple type 返回
+   `<Name>$1</Name>`（带占位符），引用/枚举/define 内容在插入后自动弹值补全
+   （`editor.action.triggerSuggest`）。
+3. **内容值补全**：`contentItems` 增加 simple-content 分支——元素自身类型是
+   simple 时按“值”补全：refType 资产 ID（严格按类型过滤）、枚举、`$DEFINE`；
+   替换范围只覆盖当前文本 token（`xmlParser.textContentTokenAt`）。
+4. **引用层纯函数**（`refs.ts`）：新增 `isReferenceContentType(typeName)`
+   （simple + refType + 排除 Poid）与 `resolveContentReferenceTargets(...)`，
+   复用属性引用的类型过滤/评分逻辑。
+5. **hover / 定义跳转 / 诊断 / Find All References**：均增加元素文本 token
+   分支；Find All References 的搜索模式扩展为同时匹配属性值（`"id"`）与
+   内容引用（`>id<`），并把结果范围裁剪到 id 本身。
+
+### 举一反三的测试（113 → 121 全绿）
+
+- `xmlParser.test.mjs`：`textContentTokenAt` 返回内容 token、边界与空白内容
+  返回 null；
+- `refs.test.mjs`：`GameObjectWeakRef` 内容只解析到 GameObject（同名
+  WeaponTemplate 排除）；`AssetReference` / `Poid` / `string` 不是全局内容
+  引用；
+- `completion.test.mjs`：用户原始场景——`<` 后接受 CreateObject 的 range 覆盖
+  `<`、`insertText` 为 `<CreateObject>$1</CreateObject>`、应用后不含 `<<`；
+  `<CreateObject>C</CreateObject>` 内只补 C 开头的 GameObject（类型过滤 +
+  token range）；
+- `contentFeatures.test.mjs`（新增）：hover 显示内容引用定义、Ctrl+点击跳到
+  同文件精确定位、诊断只报“带 refType 的内容引用”且不误报 WeakReference
+  内容。
+
+版本 **0.1.13 → 0.1.14**。
+
+### 补充（0.1.14 实机回归，2026-08-04）：真实文件里 `<` 后仍有闭合标签
+
+单元测试最初只覆盖了“文件在 `<` 处结束”的形态，用户实机复测时 `<` 后面还有
+`</CreateObject>`，`<<` 依然出现（这次是 `<<Tag>（光标在中间）</Tag>`）。
+
+**第二层根因**：解析器的 `findTagEnd` 扫描残缺开始标签时会一直找到**后面闭合
+标签的 `>`**，把它当成这个开始标签的结束，于是生成一个空名/半截名的伪元素
+（如 name 为 `""` 或 `"Cr"`）。光标落在该伪元素的 start tag 内 → 补全走
+`element-name` 分支，而该分支的替换范围只从 `<` **之后**开始，插入完整的
+`<Name>…</Name>` 片段就变成 `<<Name>`。
+
+**修复**（两层）：
+
+1. `findTagEnd` 在引号外遇到 `<`（在找到 `>` 之前）直接视为“未闭合开始标签”，
+   走原有的行尾恢复路径：`<` 单独出现时不再产生伪元素，内容区保持 content
+   上下文；`<Cr` 半截名则恢复为 `recoveredStartTag` 元素壳，仍由内容分支补全
+   （该分支的 range 已包含 `<`）。
+2. `elementNameItems` 的替换范围改为从元素 `start`（即 `<`）开始，即使后续
+   解析仍产生伪元素，也不会再 `<<`。
+
+测试补 121 → 125：`<` 后跟闭合标签不吞掉闭合标签、半截名恢复为元素壳、真实
+文件形态（`<` 后有多行属性与闭合标签）接受 CreateObject 后不含 `<<`、半截名
+`<Cr` 同样不含 `<<`。
+
+### 补充 2（0.1.14 实机回归）：`<<` 修掉后补全菜单反而消失
+
+把 `<` 纳入替换范围后，单测直接调用 provider 全部通过，但 VS Code 实机里
+`<` 后**不再弹出任何补全**；`<CreateObject>C`（尚未输入闭合标签）也不触发，
+必须补上 `</CreateObject>` 才有候选。
+
+**根因**：VS Code 用“替换范围内的文本”作为过滤前缀。范围包含 `<` 时，前缀
+就是 `<`，所有标签名都不匹配 → 菜单为空；范围为零宽且元素未闭合时，
+`textContentTokenAt` 因 `closeTagStart < 0` 返回 null，range 落在光标处、
+没有覆盖已输入的 `C`，同样过滤不到。
+
+**修复**（回到标准补全模式）：
+
+1. **已输入的 `<` 保留，不放进替换范围**：`contentChildItems` /
+   `elementNameItems` 的 range 从 `<` **之后**开始，插入文本**不再带开括号**
+   （`CreateObject>$1</CreateObject>`），应用结果仍是单个 `<`；没有输入 `<`
+   （Ctrl+Space 内容补全）时才插入完整 `<Name>…</Name>`。这样过滤前缀是
+   `""` / `Cr`，菜单正常显示。
+2. **未闭合元素也能提取内容 token**：`textContentTokenAt` 在
+   `closeTagStart < 0` 时用 `el.end` 作为内容边界，`<CreateObject>C`（EOF）
+   也能覆盖已输入的 `C` 并给出前缀过滤。
+
+测试 125 → 128：三个真实形态（孤立 `<`、`<Cr` 半截名、未闭合
+`<CreateObject>C`）均断言插入文本不带开括号、range 覆盖正确文本、应用结果
+无 `<<`，并新增“未输入 `<` 时插入完整标签”用例。
+
+---
+
+## 二十二、问题分析（第十七轮，2026-08-04）：simple-content 补全变成属性补全；大列表截断后 CrateDebris 消失
+
+### 现象
+
+1. 接受 `<CreateObject>$1</CreateObject>` 片段后，弹出的不是 GameObject id
+   补全，而是 `xai:joinAction` 与 `xmlns:xai` 两个属性名候选；
+2. 不接受这两个候选，直接在标签间输入 `C`：菜单要等较久才出现，且包含大量
+   C 开头的候选，但 **CrateDebris_01 不在其中**；继续输入 `r` / `D` / `e` /
+   `b` / `r` 后候选反而越来越少直至消失；
+3. 快速输入 `Cr`（不等第一次菜单）则 CrateDebris_01 正常出现。
+
+### 根因（两个独立问题）
+
+**A. `>` 之后的零宽光标被当成“还在 start tag 内”**
+
+`analyzeContext` 原来用 `offset <= startTagEnd` 判定光标在开始标签内。补全
+片段 `<CreateObject>$1</CreateObject>` 接受后，`$1` 恰好落在
+`startTagEnd`（`>` 后一格）这个零宽位置，于是被分到 `attribute-name`，
+返回的自然是 `xai:joinAction` / `xmlns:xai`。
+
+同类边界还有：已闭合元素的 `end` 之前也用了 `<=`，导致光标刚越过
+`</CreateObject>` 时仍被当作“在子元素内容里”，而不是父元素的内容区。
+
+**B. 引用列表超过 400 条后被硬截断，且没有告诉 VS Code“列表不完整”**
+
+`assetIdItems` 对匹配到的 id 排序后直接 `slice(0, 400)`。VS Code 收到列表后
+会在客户端按已输入的字符继续过滤这 400 条，**不会再次调用 provider**。
+于是：
+
+- 输入 `C` 时 CrateDebris_01 若排在 400 名之后，它从一开始就不在列表里；
+- 继续输入 `r` 只是在这 400 条里过滤，CrateDebris_01 永远不会出现；
+- 快速输入 `Cr` 时第一次请求的前缀已经是 `Cr`，匹配数小于 400，所以能看到。
+
+`includeSourceItems` 还有一个变体：先 `slice(0, 400)` 再排序，同样可能把
+真正优先级高的候选切掉；`defineItems` / `localIdItems` 也有同类截断隐患。
+
+### 修复
+
+1. **开始标签边界语义修正**（`context.ts` / `xmlParser.ts`）：
+   - `>` 之后（`offset === startTagEnd`）一律视为内容区，只有 `>` 尚未输入
+     的残缺开始标签仍保持 `attribute-name`；
+   - 新增 `elementContainsOffset`：已闭合 / 自闭合元素的 `end` 为开区间，
+     光标在 `</Child>` 之后回到父元素内容；未闭合元素在 EOF 仍算在元素内。
+2. **大列表标记 incomplete**（`completion.ts`）：`assetIdItems`、
+   `includeSourceItems`、`defineItems`、`localIdItems` 一旦超过 400 条就返回
+   `CompletionList(..., isIncomplete: true)`。VS Code 会在用户继续输入时重新
+   请求 provider，窄前缀下 CrateDebris_01 这类“前 400 之外”的 id 不再丢失。
+3. **局部优先 + 避免全量排序**：当前文档局部 overlay 的资产（`stream:
+   "local"`）在评分中额外降 0.4，先于全局项目候选；`topScoredDefs` 用
+   大小堆只保留前 400，不再对全部匹配 id 做 `sort`，降低大项目首键延迟。
+4. **Include source 先排序再截断**：修掉“先 slice 后 sort”的顺序问题。
+
+### 类似情况盘点
+
+- 任何带 refType 的属性值 / `inheritFrom` / simple-content 引用，只要匹配数
+  超过 400，都存在“越输越少但目标永不出现”的风险——本轮统一用 incomplete
+  解决；
+- 光标紧贴 `>` 后的零宽位置（简单元素片段 `$1`）与紧贴 `</Child>` 后的位置
+  是同一类“边界误归属”，本轮一并修掉；
+- `Include@source` 的“先截断后排序”是同一家族 bug，已修复。
+
+### 举一反三的测试（128 → 136 全绿）
+
+- `context.test.mjs`：`>` 后且有闭合标签 → content；`>` 后但闭合标签尚未
+  输入 → content；`</Child>` 之后 → 父元素 content；
+- `xmlParser.test.mjs`：已闭合 / 自闭合元素的 `end` 为开区间；未闭合元素
+  EOF 仍属于该元素；
+- `completion.test.mjs`：simple-content 片段 `$1` 位置返回值补全而不是
+  `xai:joinAction` / `xmlns:xai`；450+ 候选时返回 incomplete 列表，窄前缀
+  重请求后找到 CrateDebris_01；当前文件 local overlay 资产即使总数超过
+  400 也保留在前 400。
+
+版本 **0.1.14 → 0.1.15**。
+
+### 遗留
+
+若 Corona 上“输入 C 后菜单出现慢”仍然明显，下一个瓶颈大概率是
+`getScope()` 每次文档版本变化都重建完整局部 include 链 / 逻辑树；本轮先把
+候选截断与类型过滤造成的“列表错误”修掉，局部 scope 缓存优化留作独立一轮。

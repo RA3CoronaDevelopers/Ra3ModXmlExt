@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { dirname } from "node:path";
-import { findElementAt, parseXml } from "../language/xmlParser";
+import { findElementAt, parseXml, textContentTokenAt } from "../language/xmlParser";
 import { resolveElementType } from "../language/typeContext";
 import {
   buildSearchPaths,
@@ -9,7 +9,10 @@ import {
 } from "../indexer/includeResolver";
 import {
   isLocalReferenceAttribute,
+  isReferenceContentType,
+  resolveContentReferenceTargets,
   resolveReferenceTargetsForType,
+  type ReferenceTarget,
 } from "../indexer/refs";
 import {
   findContainingGameObject,
@@ -46,7 +49,19 @@ export class Ra3DefinitionProvider implements vscode.DefinitionProvider {
     const attr = el.attrs.find(
       (a) => a.hasValue && offset >= a.valueStart && offset <= a.valueEnd,
     );
-    if (!attr) return null;
+    if (!attr) {
+      // Element text content (e.g. <CreateObject>CrateDebris_01</CreateObject>).
+      if (idx && isReferenceContentType(elType)) {
+        const token = textContentTokenAt(document.getText(), el, offset);
+        if (token && !token.value.startsWith("$")) {
+          const targets = resolveContentReferenceTargets(idx, elType, token.value);
+          if (targets.length) {
+            return this.referenceLocations(scope, idx, targets, document);
+          }
+        }
+      }
+      return null;
+    }
     const value = attr.value;
     const nameLower = attr.name.toLowerCase();
 
@@ -80,22 +95,32 @@ export class Ra3DefinitionProvider implements vscode.DefinitionProvider {
         );
         if (local) return local;
       }
-      let targets = resolveReferenceTargetsForType(idx, elType, attr.name, value);
+      const targets = resolveReferenceTargetsForType(idx, elType, attr.name, value);
       if (!targets.length) return null;
-      if (
-        this.ws.settings.definitionMode === "project-only" &&
-        targets.some((t) => t.def.origin === "project")
-      ) {
-        targets = targets.filter((t) => t.def.origin === "project");
-      }
-      const locations: vscode.Location[] = [];
-      for (const { def } of targets.slice(0, 8)) {
-        const loc = await assetDefLocation(this.ws, def, idx, scope, document);
-        if (loc) locations.push(loc);
-      }
-      return locations.length ? locations : null;
+      return this.referenceLocations(scope, idx, targets, document);
     }
     return null;
+  }
+
+  private async referenceLocations(
+    scope: DocumentScope,
+    idx: ModIndex,
+    targets: ReferenceTarget[],
+    document: vscode.TextDocument,
+  ): Promise<vscode.Location[] | null> {
+    let filtered = targets;
+    if (
+      this.ws.settings.definitionMode === "project-only" &&
+      targets.some((t) => t.def.origin === "project")
+    ) {
+      filtered = targets.filter((t) => t.def.origin === "project");
+    }
+    const locations: vscode.Location[] = [];
+    for (const { def } of filtered.slice(0, 8)) {
+      const loc = await assetDefLocation(this.ws, def, idx, scope, document);
+      if (loc) locations.push(loc);
+    }
+    return locations.length ? locations : null;
   }
 
   private localIdLocation(
@@ -264,19 +289,41 @@ export class Ra3ReferenceProvider implements vscode.ReferenceProvider {
         (a.hasValue && offset >= a.valueStart && offset <= a.valueEnd) ||
         (offset >= a.nameStart && offset <= a.nameEnd),
     );
-    if (!attr?.hasValue) return null;
-    const id = attr.value;
+    let id: string | null = null;
+    if (attr?.hasValue) {
+      id = attr.value;
+    } else {
+      // Element text content (e.g. <CreateObject>CrateDebris_01</CreateObject>).
+      const elType = resolveElementType(el);
+      const token = textContentTokenAt(text, el, offset);
+      if (token && isReferenceContentType(elType) && !token.value.startsWith("$")) {
+        id = token.value;
+      }
+    }
     if (!id || id.startsWith("$")) return null;
 
     const locations: vscode.Location[] = [];
-    const pattern = `["']${escapeRegExp(id)}["']`;
+    // Matches both attribute values ("id" / 'id') and simple-content
+    // references (>id<); the outer delimiters are stripped from the result
+    // range below so the returned locations cover just the id.
+    const pattern = `(?:["']|>)[ \\t]*${escapeRegExp(id)}[ \\t]*(?:["']|<)`;
     await findTextInWorkspace(
       { pattern, isRegExp: true },
       { include: "**/*.xml", maxResults: 2000 },
       (result: { uri: vscode.Uri; matches: { range: vscode.Range }[] }) => {
         if (!result.uri) return;
         for (const m of result.matches) {
-          locations.push(new vscode.Location(result.uri, m.range));
+          const start = m.range.start;
+          const end = m.range.end;
+          locations.push(
+            new vscode.Location(
+              result.uri,
+              new vscode.Range(
+                new vscode.Position(start.line, start.character + 1),
+                new vscode.Position(end.line, end.character - 1),
+              ),
+            ),
+          );
         }
       },
     );

@@ -20,6 +20,13 @@ class CompletionItem {
   }
 }
 
+class CompletionList {
+  constructor(items, isIncomplete) {
+    this.items = items;
+    this.isIncomplete = isIncomplete;
+  }
+}
+
 class Position {
   constructor(line, character) {
     this.line = line;
@@ -67,6 +74,7 @@ require.cache["vscode-stub"] = {
   loaded: true,
   exports: {
     CompletionItem,
+    CompletionList,
     CompletionItemKind,
     Position,
     Range,
@@ -122,6 +130,10 @@ const makeProvider = (idx) =>
 const provider = makeProvider({});
 const providerNoIndex = makeProvider(null);
 const token = { isCancellationRequested: false };
+
+function listItems(result) {
+  return Array.isArray(result) ? result : result.items;
+}
 
 test("Surfaces enum completion works with an unclosed quote", async () => {
   const text =
@@ -467,4 +479,383 @@ test("Poid attributes offer ids from the enclosing GameObject's local scope", as
     items.every((i) => i.detail === "local module"),
     "Poid completions are labelled as local-scope ids",
   );
+});
+
+test("accepting a child element after a typed < replaces the < instead of doubling it", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE ABSOLUTE_ANGLE"\n` +
+    `      MinForceMagnitude="2.0"\n` +
+    `      MaxForceMagnitude="7.0"\n` +
+    `      DispositionIntensity="5.0"\n` +
+    `      MinLifetime="1.0s"\n` +
+    `      MaxLifetime="3.s"\n` +
+    `      MinForcePitch="90d"\n` +
+    `      MaxForcePitch="75d">\n` +
+    `      <Offset x="26.13" y="4.87" z="15.99"></Offset>\n` +
+    `      <`;
+  const lines = text.split("\n");
+  const last = lines.length - 1;
+  const pos = new Position(last, lines[last].length);
+  const document = makeDocument(text);
+
+  const items = await providerNoIndex.provideCompletionItems(document, pos, token);
+  const createObject = items.find((i) => i.label === "CreateObject");
+  const offset = items.find((i) => i.label === "Offset");
+  assert.ok(createObject);
+  assert.ok(offset);
+
+  // The typed "<" stays in the document; the range covers only the name
+  // area after it (empty here), and the snippet has no leading "<", so the
+  // final document never contains "<<" and the filter prefix is not "<".
+  const ltOffset = document.offsetAt(createObject.range.start);
+  assert.equal(ltOffset, document.offsetAt(pos));
+  assert.equal(createObject.range.end.line, last);
+  assert.equal(createObject.range.end.character, lines[last].length);
+  assert.equal(offset.range.start.character, createObject.range.start.character);
+
+  // Simple-content children must be open/close pairs with a value
+  // placeholder, never a self-closing tag, and re-trigger value suggest.
+  assert.equal(createObject.insertText.value, "CreateObject>$1</CreateObject>");
+  assert.ok(createObject.command, "simple-content child re-triggers suggest");
+
+  const applied =
+    text.slice(0, document.offsetAt(createObject.range.start)) +
+    createObject.insertText.value +
+    text.slice(document.offsetAt(createObject.range.end));
+  assert.ok(!applied.includes("<<"), "no doubled angle bracket after accepting");
+  assert.match(
+    applied.split("\n")[last],
+    /<CreateObject>\$1<\/CreateObject>/,
+  );
+});
+
+test("no << when a closing tag follows the typed < (real file shape)", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE ABSOLUTE_ANGLE">\n` +
+    `      <Offset x="26.13" y="4.87" z="15.99"></Offset>\n` +
+    `      <\n` +
+    `    </CreateObject>\n` +
+    `  </ObjectCreationList>\n` +
+    `</AssetDeclaration>`;
+  const lines = text.split("\n");
+  const last = 6;
+  const pos = new Position(last, lines[last].length);
+  const document = makeDocument(text);
+
+  const items = await providerNoIndex.provideCompletionItems(document, pos, token);
+  const createObject = items.find((i) => i.label === "CreateObject");
+  assert.ok(createObject, "child element still offered after a lone <");
+  assert.equal(document.offsetAt(createObject.range.start), document.offsetAt(pos));
+  assert.equal(createObject.insertText.value, "CreateObject>$1</CreateObject>");
+
+  const applied =
+    text.slice(0, document.offsetAt(createObject.range.start)) +
+    createObject.insertText.value +
+    text.slice(document.offsetAt(createObject.range.end));
+  assert.ok(!applied.includes("<<"), "no doubled angle bracket");
+  const appliedLines = applied.split("\n");
+  assert.match(appliedLines[6], /<CreateObject>\$1<\/CreateObject>/);
+});
+
+test("no << when a partial child name was typed before the closing tag", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject>\n` +
+    `      <Cr\n` +
+    `    </CreateObject>\n` +
+    `  </ObjectCreationList>\n` +
+    `</AssetDeclaration>`;
+  const lines = text.split("\n");
+  const last = 3;
+  const pos = new Position(last, lines[last].length);
+  const document = makeDocument(text);
+
+  const items = await providerNoIndex.provideCompletionItems(document, pos, token);
+  const createObject = items.find((i) => i.label === "CreateObject");
+  assert.ok(createObject);
+  // The "<" stays; the range covers only the typed partial name "Cr", and
+  // the snippet has no leading "<".
+  const startOffset = document.offsetAt(createObject.range.start);
+  assert.equal(text[startOffset], "C");
+  assert.equal(createObject.insertText.value, "CreateObject>$1</CreateObject>");
+  const applied =
+    text.slice(0, startOffset) +
+    createObject.insertText.value +
+    text.slice(document.offsetAt(createObject.range.end));
+  assert.ok(!applied.includes("<<"), "no doubled angle bracket for partial names");
+  assert.match(applied.split("\n")[last], /<CreateObject>\$1<\/CreateObject>/);
+});
+
+test("content completion without a typed < inserts the full tag", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject>\n` +
+    `      \n` +
+    `    </CreateObject>\n` +
+    `  </ObjectCreationList>\n` +
+    `</AssetDeclaration>`;
+  const pos = new Position(3, 6);
+  const items = await providerNoIndex.provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const createObject = items.find((i) => i.label === "CreateObject");
+  assert.ok(createObject);
+  // No "<" was typed: the snippet includes the opening bracket and the
+  // replacement range is empty at the cursor.
+  assert.equal(createObject.insertText.value, "<CreateObject>$1</CreateObject>");
+  assert.equal(createObject.range.start.character, 6);
+  assert.equal(createObject.range.end.character, 6);
+});
+
+test("simple-content element offers typed asset ids as the text value", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject>\n` +
+    `      <CreateObject>C</CreateObject>\n` +
+    `    </CreateObject>\n` +
+    `  </ObjectCreationList>\n` +
+    `</AssetDeclaration>`;
+  const line = text.split("\n")[3];
+  const pos = new Position(3, line.indexOf(">C") + 2);
+  const go = {
+    type: "GameObject",
+    id: "CrateDebris_01",
+    file: "Crates.xml",
+    line: 1,
+    origin: "project",
+  };
+  const weapon = {
+    type: "WeaponTemplate",
+    id: "CrateWeapon_01",
+    file: "Weapons.xml",
+    line: 1,
+    origin: "project",
+  };
+  const idx = {
+    assets: new Map([
+      ["GameObject", new Map([["cratedebris_01", [go]]])],
+      ["WeaponTemplate", new Map([["crateweapon_01", [weapon]]])],
+    ]),
+    assetsById: new Map([
+      ["cratedebris_01", [go]],
+      ["crateweapon_01", [weapon]],
+    ]),
+  };
+  const items = await makeProvider(idx).provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("CrateDebris_01"));
+  assert.ok(
+    !labels.includes("CrateWeapon_01"),
+    "content refs are filtered by the element's refType (GameObject)",
+  );
+  const item = items.find((i) => i.label === "CrateDebris_01");
+  assert.equal(item.range.start.character, line.indexOf(">C") + 1);
+  assert.equal(item.range.end.character, pos.character);
+  assert.equal(item.insertText, "CrateDebris_01");
+});
+
+test("simple-content value completion works before the closing tag is typed", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject>\n` +
+    `      <CreateObject>C`;
+  const line = text.split("\n")[3];
+  const pos = new Position(3, line.length);
+  const go = {
+    type: "GameObject",
+    id: "CrateDebris_01",
+    file: "Crates.xml",
+    line: 1,
+    origin: "project",
+  };
+  const idx = {
+    assets: new Map([["GameObject", new Map([["cratedebris_01", [go]]])]]),
+    assetsById: new Map([["cratedebris_01", [go]]]),
+  };
+  const items = await makeProvider(idx).provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("CrateDebris_01"));
+  const item = items.find((i) => i.label === "CrateDebris_01");
+  // The unclosed element's end is the document end, so the typed "C" is
+  // still a real token and the range covers it.
+  assert.equal(item.range.start.character, line.indexOf(">C") + 1);
+  assert.equal(item.range.end.character, pos.character);
+});
+
+test("content start after accepting a simple-content snippet offers values, not attributes", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject>\n` +
+    `      <CreateObject></CreateObject>\n` +
+    `    </CreateObject>\n` +
+    `  </ObjectCreationList>\n` +
+    `</AssetDeclaration>`;
+  const line = text.split("\n")[3];
+  const pos = new Position(3, line.indexOf(">") + 1);
+  const go = {
+    type: "GameObject",
+    id: "CrateDebris_01",
+    file: "Crates.xml",
+    line: 1,
+    origin: "project",
+  };
+  const idx = {
+    assets: new Map([["GameObject", new Map([["cratedebris_01", [go]]])]]),
+    assetsById: new Map([["cratedebris_01", [go]]]),
+  };
+  const result = await makeProvider(idx).provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const labels = listItems(result).map((i) => i.label);
+  assert.ok(labels.includes("CrateDebris_01"));
+  assert.ok(!labels.includes("xai:joinAction"));
+  assert.ok(!labels.includes("xmlns:xai"));
+});
+
+test("large asset-id lists are incomplete so narrower prefixes can re-request", async () => {
+  const defs = [];
+  for (let i = 0; i < 450; i++) {
+    defs.push({
+      type: "GameObject",
+      id: `C${String(i).padStart(3, "0")}`,
+      file: `C${i}.xml`,
+      line: 1,
+      origin: "project",
+    });
+  }
+  defs.push({
+    type: "GameObject",
+    id: "CrateDebris_01",
+    file: "Crates.xml",
+    line: 1,
+    origin: "project",
+  });
+  const byId = new Map();
+  const gameObjects = new Map();
+  const assets = new Map([["GameObject", gameObjects]]);
+  for (const def of defs) {
+    const key = def.id.toLowerCase();
+    byId.set(key, [def]);
+    gameObjects.set(key, [def]);
+  }
+  const idx = { assets, assetsById: byId };
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject>\n` +
+    `      <CreateObject>C</CreateObject>\n` +
+    `    </CreateObject>\n` +
+    `  </ObjectCreationList>\n` +
+    `</AssetDeclaration>`;
+  const line = text.split("\n")[3];
+  const pos = new Position(3, line.indexOf(">C") + 2);
+
+  const first = await makeProvider(idx).provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  assert.equal(Array.isArray(first), false);
+  assert.equal(first.isIncomplete, true, "capped list asks VS Code to recompute");
+  assert.equal(first.items.length, 400);
+  assert.ok(
+    !first.items.some((i) => i.label === "CrateDebris_01"),
+    "the target is beyond the initial 400 and must be found by a re-request",
+  );
+
+  // isIncomplete makes VS Code call the provider again as the prefix narrows.
+  const text2 = text.replace(">C<", ">Cr<");
+  const line2 = text2.split("\n")[3];
+  const second = await makeProvider(idx).provideCompletionItems(
+    makeDocument(text2),
+    new Position(3, line2.indexOf(">Cr") + 3),
+    token,
+  );
+  const secondItems = listItems(second);
+  assert.ok(
+    secondItems.some((i) => i.label === "CrateDebris_01"),
+    "narrower prefix re-request reaches the previously cut-off id",
+  );
+});
+
+test("current-file local overlay assets survive the global 400 cap", async () => {
+  const defs = [];
+  for (let i = 0; i < 450; i++) {
+    defs.push({
+      type: "GameObject",
+      id: `C${String(i).padStart(3, "0")}`,
+      file: `C${i}.xml`,
+      line: 1,
+      origin: "project",
+    });
+  }
+  const byId = new Map();
+  const gameObjects = new Map();
+  const assets = new Map([["GameObject", gameObjects]]);
+  for (const def of defs) {
+    const key = def.id.toLowerCase();
+    byId.set(key, [def]);
+    gameObjects.set(key, [def]);
+  }
+  const localGo = {
+    type: "GameObject",
+    id: "CrateDebris_01",
+    file: "Crates.xml",
+    line: 1,
+    origin: "project",
+    stream: "local",
+  };
+  const idx = {
+    assets,
+    assetsById: byId,
+    local: {
+      assets: new Map([
+        ["GameObject", new Map([["cratedebris_01", [localGo]]])],
+      ]),
+      assetsById: new Map([["cratedebris_01", [localGo]]]),
+      defines: new Map(),
+    },
+  };
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject>\n` +
+    `      <CreateObject>C</CreateObject>\n` +
+    `    </CreateObject>\n` +
+    `  </ObjectCreationList>\n` +
+    `</AssetDeclaration>`;
+  const line = text.split("\n")[3];
+  const result = await makeProvider(idx).provideCompletionItems(
+    makeDocument(text),
+    new Position(3, line.indexOf(">C") + 2),
+    token,
+  );
+  assert.equal(Array.isArray(result), false);
+  assert.equal(result.isIncomplete, true);
+  assert.ok(result.items.some((i) => i.label === "CrateDebris_01"));
 });
