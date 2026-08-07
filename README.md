@@ -19,7 +19,15 @@
     400 条时标记为不完整，继续输入会重新请求，因此 `CrateDebris_01` 这类排在
     列表后部的 id 不会因首屏截断而消失。
 - **悬停提示**：元素/属性显示 XSD 文档、类型、必填/默认值；引用值显示定义位置；`$DEFINE` 显示值与定义位置；`Include source` / `xi:include href` 显示解析后的目标文件；`xi:include` 元素与属性给出 XInclude 说明。
-- **引用导航**：从引用值（`CommandSet="..."`、`Weapon="..."`、`inheritFrom`、`<CreateObject>ID</CreateObject>` 等元素文本）跳转到定义（严格按引用类型过滤，候选由 `ra3modxml.definitionMode` 控制：`all` 列出 mod + 原版、`project-only` 优先项目内定义）；`Ctrl+点击` Include / `xi:include href` 打开目标文件；Find All References 同时搜索属性值与元素文本内容；文档大纲列出顶层资产与 `$DEFINE`。
+- **引用导航**：从引用值（`CommandSet="..."`、`Weapon="..."`、`inheritFrom`、`<CreateObject>ID</CreateObject>` 等元素文本）跳转到定义（严格按引用类型过滤，候选由 `ra3modxml.definitionMode` 控制：`all` 列出 mod + 原版、`project-only` 优先项目内定义）；`Ctrl+点击` Include / `xi:include href` 打开目标文件；Find All References 基于**语义引用索引**（属性引用 + simple-content 文本 + `inheritFrom`，排除 id 定义点 / Poid / `$DEFINE`，不再全文搜索）；文档大纲列出顶层资产与 `$DEFINE`。
+- **引用计数（CodeLens）**：在“设计上应被引用”的顶部资产类型上显示
+  `0 references` / `1 reference` / `N references`（0 也显示），点击直接打开
+  references peek；设置类、地图元数据、w3x 子结构等自动注册类型不显示，
+  避免满屏 0；manifest 资产有对应 SageXml 源码时，引用按源码定义归并计数
+  （打开 SageXml 源码同样能看到引用数）。
+- **未引用资产**：`RA3 Mod XML: Find unreferenced assets…` 命令按类型列出
+  所有零引用的项目资产并跳转；编辑器右键菜单
+  `Find unreferenced assets of this type` 可直接使用光标所在资产类型。
 - **当前文档局部作用域（T1）**：即使一个文件不在任何全局流里（没有从
   `Data/Mod.xml` / `additionalmaps` 可达），插件也会按当前文件自身的资产、
   `$DEFINE` 及其 include 链建立局部索引。`xi:include` 会在逻辑树中展开，
@@ -38,13 +46,16 @@
   Include 跳转/悬停照常工作；引用类诊断会“显示但标注”
   （`unresolved-reference-indexing` + `(index incomplete)` 说明），不会把
   未完成的索引误当成最终结论。
-- **大项目性能**：索引记录（资产 / Define / Include / 行号）与 include 解析结果
-  跨重建缓存，保存触发的重建零 stat、零重读（Corona 实测约 2 秒）；DOM 树只按需
-  保留并设元素预算，避免内存膨胀。编辑器外的文件改动（git pull、导出工具）会
-  触发防抖重建；构建期间文件再次被修改时，已发布索引会标记 `(stale)` 并自动重跑。
-  include 路径解析使用目录枚举建立的文件集快照（无 statSync 风暴）；records
-  缓存会持久化到磁盘（gzip + 多信号 stat 校验 + 原子写），重启 VS Code 后冷启动
-  只需秒级校验，Corona 实测约 11 秒（首次全量约 2 分钟）。
+- **大项目性能**：索引记录（资产 / Define / Include / 引用 / 行号）与 include
+  解析结果跨重建缓存，保存触发的重建零 stat、零重读（Corona 实测约 2 秒）；
+  DOM 树只按需保留并设元素预算，避免内存膨胀。编辑器外的文件改动（git pull、
+  导出工具）会触发防抖重建；构建期间文件再次被修改时，已发布索引会标记
+  `(stale)` 并自动重跑。include 路径解析使用目录枚举建立的文件集快照（无
+  statSync 风暴）；records 缓存会持久化到磁盘（gzip + 多信号 stat 校验 +
+  内容哈希 + 原子写），重启 VS Code 后冷启动只需秒级校验，Corona 实测约 11 秒
+  （首次全量约 2 分钟）。引用索引只从构建期实际消费的 records 构建；打开文档
+  时若发现当前文本的 records 与快照不一致（如外置盘重连后缓存过时），会自动
+  定向重建自愈；`Re-index workspace` 会对 stat 匹配的 XML 也做内容校验。
 
 ## 使用
 
@@ -70,6 +81,9 @@
 - `RA3 Mod XML: Show index report`：查看索引统计。
 - `RA3 Mod XML: Clear caches and rebuild`：清空内存/磁盘缓存并强制全量重建。
 - `RA3 Mod XML: Show cache report`：查看磁盘缓存路径、大小、校验统计与命中数。
+- `RA3 Mod XML: Find unreferenced assets…`：按类型查找零引用的项目资产。
+- `RA3 Mod XML: Find unreferenced assets of this type`：右键菜单入口，
+  直接查找光标所在顶部资产类型的未引用资产。
 
 ## 开发
 
@@ -102,17 +116,19 @@ src/
     existence.ts          文件集存在性快照（目录枚举 Set，替代逐路径 statSync）
     manifestParser.ts     .manifest 二进制解析（移植 OpenSAGE ManifestFile.cs）
     fileScanner.ts        目录扫描与 Include source 候选
-    refs.ts               引用目标解析（按引用类型过滤）
+    refs.ts               引用目标解析（按引用类型过滤）+ “设计上可被引用类型”判定
+    referenceIndex.ts     引用记录 → 反向引用索引（定义 → 引用位置）+ 未引用报告
     xpointer.ts           xi:include xpointer 子集解析（纯 TS）
     logicalTree.ts        当前文档逻辑树（xi:include 拼接、局部作用域）
     localScope.ts         文档局部索引 overlay（自身链 + include 链）
     shallowScan.ts        .w3x 等大体积美术资产顶层浅扫描（纯 TS，不建 DOM）
-    records.ts            每文件紧凑索引记录（资产/Define/Include/xi + 行号）
+    records.ts            每文件紧凑索引记录（资产/Define/Include/xi/引用 + 行号偏移）
     caches.ts             跨重建持久缓存（DocumentCache / IndexRecordsCache /
                           IncludeResolveCache）+ 失效纪元 InvalidationsEpoch
     diskCache.ts          跨会话磁盘缓存（gzip JSON、原子写、多信号 stat 校验）
     indexer.ts            工作区索引器（后台、缓存、记录驱动重建、分阶段发布）
-  features/               completion / hover / navigation / diagnostics / semanticTokens
+  features/               completion / hover / navigation / references / codeLens /
+                          unreferenced / diagnostics / semanticTokens
 syntaxes/                 TextMate 注入语法
 tools/                    XSD → 模型、AssetType 枚举提取
 ```
@@ -124,4 +140,5 @@ tools/                    XSD → 模型、AssetType 枚举提取
 - 领域说明与需求：`docs/requirements.md`
 - 调研与设计决策：`docs/plan.md`
 - 问题分析与修复记录：`docs/analysis-issues.md`
+- 引用计数 / 语义 FAR / 未引用资产功能设计：`docs/features-reference-counts.md`
 - Manifest 格式参考：OpenSAGE `src/OpenSage.Game/Data/StreamFS/ManifestFile.cs`（本仓库 `OpenSAGE/` 子目录，commit `d45d361`）

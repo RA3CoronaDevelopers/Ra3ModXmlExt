@@ -1,6 +1,6 @@
 # 调研结论与实施计划（已按最新代码同步更新）
 
-> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-04）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）、simple-content 元素文本引用（补全 / hover / 跳转 / 诊断 / Find All References）等。
+> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-05）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）、simple-content 元素文本引用（补全 / hover / 跳转 / 诊断 / Find All References）、语义引用索引 / CodeLens 引用计数 / 未引用资产命令等。
 
 ## 一、调研结论（带证据）
 
@@ -86,9 +86,10 @@ src/
     manifestParser.ts  .manifest 二进制解析 + 类型/ID 推导（纯 TS）
     fileScanner.ts     目录遍历缓存 + Include source 候选收集
     refs.ts            引用目标解析（属性 + 元素文本内容，按 refType / isRef /
-                       inheritFrom 过滤，纯 TS）
+                       inheritFrom 过滤，纯 TS）+ “设计上可被引用类型”判定
+    referenceIndex.ts  引用记录 → 反向引用索引（定义 → 引用位置）+ 未引用报告
     shallowScan.ts     大体积美术资产（.w3x 等）顶层浅扫描（纯 TS，不建 DOM）
-    records.ts         每文件紧凑索引记录（资产/Define/Include/xi + 行号）
+    records.ts         每文件紧凑索引记录（资产/Define/Include/xi/引用 + 行号偏移）
     caches.ts          跨重建持久缓存（DocumentCache / IndexRecordsCache /
                        IncludeResolveCache）+ 失效纪元 InvalidationsEpoch
     diskCache.ts       跨会话磁盘缓存（gzip JSON、原子写、多信号 stat 校验）
@@ -99,6 +100,9 @@ src/
     completion.ts      补全 provider（元素/属性/值，上下文感知；xs:list 多值按当前段过滤）
     hover.ts           hover provider
     navigation.ts      定义/引用/文档链接/大纲
+    references.ts      语义 FAR / 引用上下文 / CodeLens 命令共享逻辑
+    codeLens.ts        CodeLens 引用计数（类型过滤，0 也显示，点击开 references peek）
+    unreferenced.ts    未引用资产 QuickPick 命令 + 右键菜单入口
     diagnostics.ts     实时诊断
     semanticTokens.ts  语义 token provider（文档有解析错误时接管着色）
 syntaxes/
@@ -108,9 +112,10 @@ tools/
   extract-asset-types.mjs OpenSAGE AssetType.cs → asset-types.json
 test/
   fixtures/minimod      样例 Mod（include 各种情形、同名 ID、嵌套 xi:include、manifest 回退）
-  *.test.mjs            11 个测试文件（xmlParser / context / completion / semanticTokens /
+  *.test.mjs            14 个测试文件（xmlParser / context / completion / semanticTokens /
                         includeResolver / manifestParser / indexer / schemaModel / refs /
-                        typeContext / manifestTypes）
+                        typeContext / manifestTypes / referenceIndex / codeLens /
+                        referenceProvider）
 ```
 
 ### 关键设计决策
@@ -251,6 +256,27 @@ test/
     用 `<` 做过滤前缀导致菜单为空——改为保留已输入的 `<`、range 从 `<` 之后
     开始、插入文本不带开括号；`textContentTokenAt` 对未闭合元素用 `el.end`
     作内容边界。
+28. **语义引用索引 + CodeLens 计数 + 未引用资产（第十八轮，2026-08-05）**：
+    - 动机与结论：292 个有模型类型的顶层资产中 191 个在 XSD 中没有任何
+      类型化引用指向（设置/地图元数据/w3x 子结构等自动注册类型），
+      AttachTest 实测 29% 项目定义 0 引用、48% 恰好 1 引用。因此 CodeLens
+      计数只显示在 `isReferenceTargetType()` 为真的类型上（类型化引用目标 +
+      `inheritFrom` 可继承类型），0 也显示；未引用报告默认也只列这些类型。
+    - 数据：`IndexRecords` 增加 `references[]`
+      （`kind / refType / selfType / value / line / start / end`），解析期固化
+      引用上下文，反向索引构建零 DOM、零上下文重解析；`ModIndex.references`
+      为“定义 key → 引用位置”的反向表，快照发布时构建；磁盘缓存版本
+      v1 → v2（`index-records-v2.json.gz`），v3 起附加内容/records 哈希。
+    - FAR 从全文搜索改为语义索引：不再把 `id="X"` 定义行、`EditorName="X"`
+      等非引用属性计为引用；CodeLens 显示的计数与点击打开的 references peek
+      严格一致；`includeDeclaration` 时才附加定义位置。
+    - 未引用资产：命令面板 `Find unreferenced assets…` + 编辑器右键菜单
+      `Find unreferenced assets of this type`；只统计 `origin === "project"`
+      且非 `viaInstance` 的定义；覆盖原版 id 时来自原版/其他流的引用计入。
+    - 边界：局部 scope（不在全局流里的文件）的引用不入全局反向索引；
+      `AssetIdList` 等列表引用按整值记录；w3x 不提取引用记录（对 w3x 资产的
+      引用从引用它的 XML 捕获）；manifest 编译期引用图（AssetReference 缓冲）
+      留作后续。设计文档：`docs/features-reference-counts.md`。
 
 ## 三、实施步骤
 
@@ -308,6 +334,24 @@ test/
     id/define/local/include 候选返回 `isIncomplete` 让 VS Code 随输入重请求；
     当前文档 local 资产优先、候选 top-N 用堆避免全量排序、Include source
     先排序再截断；测试 128 → 136。
+21. [x] 语义引用索引 + CodeLens + 未引用资产（第十八轮，2026-08-05）：
+    records 引用记录提取、`referenceIndex.ts` 反向索引、语义 FAR（替换全文
+    搜索）、CodeLens 引用计数（类型过滤、0 也显示、点击开 references peek）、
+    `findUnreferencedAssets` 命令 + 右键菜单、磁盘缓存 v2；
+    测试 136 → 146；设计文档 `docs/features-reference-counts.md`。
+22. [x] FAR 定义行排除 + manifest 源引用归并（2026-08-05 修复轮）：
+    FAR 不再因 `includeDeclaration` 附加定义行（消除“自引用”观感）；
+    `referenceSitesForDefinition` 把 manifestSource 可解析到当前文件的
+    manifest 定义站点并入 CodeLens 计数（AttachTest 326 个 manifest 定义
+    受益）；测试 146 → 147；版本 0.1.17；分析见
+    `docs/analysis-issues.md` 二十三。
+23. [x] 引用索引与缓存同步加固（2026-08-06）：反向索引改为从**构建期本地
+    records**（`buildRecords`）构建，不再读共享 recordsCache——中途失效、
+    feature `readDom` 重读都不再造成“资产在但引用缺失”；构建中 `readDom`
+    不再被定义跳转调用（避免污染进行中的构建）；force 重建（Re-index）
+    对 stat 匹配的 full XML 做内容哈希校验；打开文档时比较 records 哈希，
+    不一致则定向 invalidate + `records-desync` 重建自愈；磁盘缓存 v2 → v3；
+    测试 147 → 151；分析见 `docs/analysis-issues.md` 二十四。
 
 ## 四、验证结果（实测）
 
@@ -320,19 +364,23 @@ test/
 单元测试覆盖：XML 解析（自闭合/容错/偏移/未闭合引号行尾恢复 + recovered
 标记）、补全上下文（未闭合引号仍为 attribute-value、多行未闭合引号、list 多值
 分段、闭合引号后为 attribute-name）、补全集成（vscode stub 下
-`LocomotorTemplate@Surfaces` 未闭合引号枚举补全、空格后第二段过滤与替换范围、
-空格后排除已用 flag、中间插入范围止于光标、闭合值末尾追加模式、`CAN_ATTACK`
-前缀保护、多行未闭合 `Disposition` 完整链路、闭合引号后补空格、一行一个属性
-换行缩进、新行缩进对齐、标量类型化默认值）、语义 token（标签/属性/值范围、
-合法文档返回空、malformed 返回兜底 token）、include 解析（BAB 顺序、SDK 根
-优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器
-（资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、
-`childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list`
-枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、
-模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中
-manifest 的 `PlayerTemplate`）、simple-content 文本引用（`<` 后补全不产生
-`<<`、`<CreateObject>$1</CreateObject>` 片段、内容值按 refType 过滤、
-内容 hover / Ctrl 跳转 / 诊断）。
+    `LocomotorTemplate@Surfaces` 未闭合引号枚举补全、空格后第二段过滤与替换范围、
+    空格后排除已用 flag、中间插入范围止于光标、闭合值末尾追加模式、`CAN_ATTACK`
+    前缀保护、多行未闭合 `Disposition` 完整链路、闭合引号后补空格、一行一个属性
+    换行缩进、新行缩进对齐、标量类型化默认值）、语义 token（标签/属性/值范围、
+    合法文档返回空、malformed 返回兜底 token）、include 解析（BAB 顺序、SDK 根
+    优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器
+    （资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、
+    `childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list`
+    枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、
+    模块 `id` 定义点、Poid 局部引用、`xi:include` 不校验、`Side="Allies"` 命中
+    manifest 的 `PlayerTemplate`）、simple-content 文本引用（`<` 后补全不产生
+    `<<`、`<CreateObject>$1</CreateObject>` 片段、内容值按 refType 过滤、
+    内容 hover / Ctrl 跳转 / 诊断）、引用索引（records 引用提取：attr/content/
+    inheritFrom、排除 id/Poid/`$DEFINE`/枚举；`buildReferenceIndex` 严格类型过滤
+    不串同名 ID；minimod 集成：`CommandSet` / `inheritFrom` 反向命中；未引用过滤
+    只含 project 非 viaInstance；CodeLens 类型过滤与 0 显示；语义 FAR 排除定义
+    行与非引用属性）。
 
 > 注：D: 盘移动硬盘已恢复连接；Corona 已在第八 / 九轮按上述新数据回归。
 

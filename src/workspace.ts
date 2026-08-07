@@ -92,7 +92,7 @@ export class ModWorkspace {
     this.settings = readSettings();
     const storageUri = context.storageUri ?? context.globalStorageUri;
     if (storageUri) {
-      this.diskCachePath = join(storageUri.fsPath, "index-records-v1.json.gz");
+      this.diskCachePath = join(storageUri.fsPath, "index-records-v3.json.gz");
     }
     this.output = vscode.window.createOutputChannel("RA3 Mod XML");
     this.statusBar = vscode.window.createStatusBarItem(
@@ -145,6 +145,11 @@ export class ModWorkspace {
 
   async initialize(): Promise<void> {
     this.projectRoot = this.detectProjectRoot();
+    void vscode.commands.executeCommand(
+      "setContext",
+      "ra3modxml.active",
+      this.projectRoot != null,
+    );
     if (!this.projectRoot) {
       this.statusBar.hide();
       return;
@@ -346,6 +351,7 @@ export class ModWorkspace {
         stat: rec.stat,
         records: rec.records,
         kind: rec.kind,
+        contentHash: rec.contentHash,
       });
     }
   }
@@ -451,6 +457,7 @@ export class ModWorkspace {
       `${s.projectDir}\n` +
       `${s.indexedFiles} files indexed (${s.parsedFiles} parsed, ${s.shallowScannedFiles} art assets shallow-scanned, ${(s.elapsedMs / 1000).toFixed(1)}s)\n` +
       `${s.assetCount} assets (${s.manifestAssetCount} from ${s.manifestFiles} manifests)\n` +
+      `${s.referenceCount} reference sites\n` +
       `${s.defineCount} defines, ${s.streams} streams, ${s.sourceCandidates} include candidates\n` +
       `Phase: ${s.phase} · Complete: ${s.complete}${stale}`;
   }
@@ -589,7 +596,7 @@ export class ModWorkspace {
       return {
         file: { path: resolve(path), stat: null },
         parse,
-        records: extractIndexRecords(parse, lineMap),
+        records: extractIndexRecords(parse, lineMap, text),
         lineMap,
       };
     } catch {

@@ -31,7 +31,7 @@ async function readParsed(path) {
   return {
     file: { path, stat: null },
     parse,
-    records: extractIndexRecords(parse, lineMap),
+    records: extractIndexRecords(parse, lineMap, text),
     lineMap,
   };
 }

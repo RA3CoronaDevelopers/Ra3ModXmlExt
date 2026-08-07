@@ -92,6 +92,11 @@ export const modelMeta = {
   typeCount: Object.keys(model.types).length,
 };
 
+/** All type names in the XSD model (complex + simple), in model order. */
+export function allTypeNames(): string[] {
+  return Object.keys(model.types);
+}
+
 export function topLevelElements(): string[] {
   return model.topLevelElements;
 }

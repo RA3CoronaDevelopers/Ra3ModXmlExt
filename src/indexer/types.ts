@@ -24,6 +24,22 @@ export interface AssetDef {
   manifestSource?: string;
 }
 
+/**
+ * One resolved reference occurrence pointing at an asset definition.
+ * Produced by `buildReferenceIndex` from per-file reference records.
+ */
+export interface ReferenceSite {
+  /** Absolute path of the referencing file. */
+  file: string;
+  /** 1-based line of the reference value. */
+  line: number;
+  /** Character offset of the value start (relative to the file text). */
+  start: number;
+  /** Character offset one past the value end. */
+  end: number;
+  kind: "attr" | "content";
+}
+
 export interface DefineDef {
   name: string;
   value: string;
@@ -121,6 +137,8 @@ export interface IndexStats {
   /** Time spent shallow-scanning deferred art assets (ms). */
   artScanMs: number;
   assetCount: number;
+  /** Total resolved reference sites in the reverse index. */
+  referenceCount: number;
   defineCount: number;
   manifestFiles: number;
   manifestAssetCount: number;
@@ -159,6 +177,20 @@ export interface ModIndex {
   sourceCandidates: SourceCandidate[];
   /** Problems found while indexing (unresolved includes, cycles, ...). */
   diagnostics: IndexerDiagnostic[];
+  /**
+   * Reverse reference index: asset definition key (see
+   * `referenceIndex.assetDefKey`) -> reference sites. Built from the compact
+   * per-file reference records when a snapshot is published, so counts and
+   * Find All References share one semantic source of truth.
+   */
+  references: Map<string, ReferenceSite[]>;
+  /**
+   * normKey(file) -> SHA-1 of the file's compact index records as this
+   * snapshot consumed them. Lets open documents detect "my file changed on
+   * disk but the index still uses older records" and trigger a targeted
+   * rebuild, while ignoring cosmetic text changes (line endings, whitespace).
+   */
+  recordsHashes: Map<string, string>;
   stats: IndexStats;
   /**
    * Document-local overlay (when the index was obtained through the

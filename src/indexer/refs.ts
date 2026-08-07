@@ -1,15 +1,31 @@
 import {
+  allTypeNames,
   attributesOfType,
+  canonicalTypeName,
   elementTypeName,
   isAssignableTo,
   typeChain,
   typeInfo,
 } from "../model/schemaModel";
-import type { AssetDef, ModIndex } from "./types";
+import type { AssetDef, LocalOverlay } from "./types";
 
 export interface ReferenceTarget {
   def: AssetDef;
   score: number;
+}
+
+/**
+ * The subset of `ModIndex` that reference resolution needs. Kept narrow so
+ * the reverse reference index can resolve records against the indexer's live
+ * maps without constructing a full index snapshot.
+ */
+export interface ReferenceLookup {
+  /** type -> id -> definitions. */
+  assets: Map<string, Map<string, AssetDef[]>>;
+  /** id -> definitions across all types. */
+  assetsById: Map<string, AssetDef[]>;
+  /** Optional document-local overlay (consulted first). */
+  local?: LocalOverlay;
 }
 
 /**
@@ -78,7 +94,7 @@ export function isReferenceAttributeOfType(
  * Returns [] when the attribute is not a typed reference or nothing matches.
  */
 export function resolveReferenceTargets(
-  idx: ModIndex,
+  idx: ReferenceLookup,
   elementType: string,
   attrName: string,
   id: string,
@@ -93,7 +109,7 @@ export function resolveReferenceTargets(
 
 /** Same resolution, driven by a resolved XSD type name. */
 export function resolveReferenceTargetsForType(
-  idx: ModIndex,
+  idx: ReferenceLookup,
   typeName: string | null,
   attrName: string,
   id: string,
@@ -148,7 +164,7 @@ export function isReferenceContentType(typeName: string | null): boolean {
  * (e.g. `GameObjectWeakRef` -> `GameObject`).
  */
 export function resolveContentReferenceTargets(
-  idx: ModIndex,
+  idx: ReferenceLookup,
   typeName: string | null,
   id: string,
 ): ReferenceTarget[] {
@@ -164,7 +180,7 @@ export function resolveContentReferenceTargets(
   return filterAndScoreDefs(defs, refType, null);
 }
 
-function filterAndScoreDefs(
+export function filterAndScoreDefs(
   defs: readonly AssetDef[],
   refType: string | null,
   selfType: string | null,
@@ -203,4 +219,50 @@ export function mergeLocalAndGlobalDefs(
     }
   }
   return out;
+}
+
+let referenceTargetTypeSet: Set<string> | null = null;
+
+/**
+ * The set of XSD types that are "reference targets by design": at least one
+ * typed reference attribute / simple-content reference points at them, or
+ * they are inheritable (`inheritFrom`). Types outside this set are
+ * auto-registered / structural (settings, map metadata, w3x sub-assets...),
+ * so a zero reference count is their normal state and counts would only be
+ * noise.
+ */
+export function referenceTargetTypes(): ReadonlySet<string> {
+  if (referenceTargetTypeSet) return referenceTargetTypeSet;
+  const set = new Set<string>();
+  const add = (t: string | null) => {
+    if (!t) return;
+    set.add(canonicalTypeName(t) ?? t);
+  };
+  for (const typeName of allTypeNames()) {
+    const info = typeInfo(typeName);
+    if (!info) continue;
+    if (info.kind === "complex") {
+      for (const attr of info.attributes) {
+        if (isLocalReferenceAttribute(typeName, attr.name)) continue;
+        if (attr.refType) add(attr.refType);
+      }
+      if (info.attributes.some((a) => a.name.toLowerCase() === "inheritfrom")) {
+        add(typeName);
+      }
+    } else if (
+      info.kind === "simple" &&
+      info.refType &&
+      !typeChain(typeName).includes("Poid")
+    ) {
+      add(info.refType);
+    }
+  }
+  referenceTargetTypeSet = set;
+  return set;
+}
+
+/** True when the type is a designed reference target (see above). */
+export function isReferenceTargetType(typeName: string | null): boolean {
+  if (!typeName) return false;
+  return referenceTargetTypes().has(canonicalTypeName(typeName) ?? typeName);
 }

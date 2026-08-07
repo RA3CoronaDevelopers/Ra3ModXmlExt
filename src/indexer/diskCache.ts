@@ -34,7 +34,14 @@ import type { IndexedFile } from "./types";
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
-export const DISK_CACHE_VERSION = 1;
+/**
+ * v2: per-file records now carry typed reference records (`references`),
+ * so caches produced by v1 (assets/defines/includes only) are stale.
+ * v3: full XML records carry `contentHash`, and snapshots publish per-file
+ * `recordsHashes` for the desync self-heal; caches without hashes cannot be
+ * verified, so v2 files are regenerated once.
+ */
+export const DISK_CACHE_VERSION = 3;
 /** How many stat validations run concurrently on load. */
 const VALIDATE_CONCURRENCY = 32;
 
@@ -53,6 +60,8 @@ export interface DiskCacheRecord {
   stat: NonNullable<IndexedFile["stat"]>;
   records: IndexRecords;
   kind: "full" | "shallow";
+  /** Content hash for full XML parses (see `IndexRecordsCacheEntry`). */
+  contentHash?: string;
 }
 
 interface DiskCacheFile {
@@ -173,6 +182,7 @@ export class DiskRecordsCache {
         stat: entry.stat,
         records: entry.records,
         kind: entry.kind,
+        contentHash: entry.contentHash,
       });
     }
     const payload: DiskCacheFile = {

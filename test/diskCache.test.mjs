@@ -19,6 +19,7 @@ const sampleRecords = {
   includes: [{ type: "all", source: "Units.xml", line: 4 }],
   rootXiIncludes: [],
   nestedXiIncludes: [],
+  references: [],
 };
 
 function stampOf(file) {
@@ -47,7 +48,12 @@ test("disk cache roundtrip keeps records and leaves no temp file", async (t) => 
   await cache.save([
     [
       file.toLowerCase(),
-      { stat: stampOf(file), records: sampleRecords, kind: "full" },
+      {
+        stat: stampOf(file),
+        records: sampleRecords,
+        kind: "full",
+        contentHash: "abc123",
+      },
     ],
   ]);
   assert.equal(fs.existsSync(`${filePath}.tmp`), false, "atomic write leaves no temp");
@@ -60,6 +66,7 @@ test("disk cache roundtrip keeps records and leaves no temp file", async (t) => 
   assert.equal(stats.dropped, 0);
   assert.equal(records.length, 1);
   assert.deepEqual(records[0].records, sampleRecords);
+  assert.equal(records[0].contentHash, "abc123");
 });
 
 test("stat mismatch drops the cached entry", async (t) => {

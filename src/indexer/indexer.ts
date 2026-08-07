@@ -40,14 +40,26 @@ import {
 } from "./manifestParser";
 import { canonicalTypeName } from "../model/schemaModel";
 import { collectSourceCandidates } from "./fileScanner";
-import { DocumentCache, IncludeResolveCache, IndexRecordsCache, normKey } from "./caches";
+import {
+  contentHash,
+  DocumentCache,
+  IncludeResolveCache,
+  IndexRecordsCache,
+  normKey,
+  recordsHash,
+} from "./caches";
 import type { IndexRecordsCacheEntry } from "./caches";
 import { scanXmlShallow } from "./shallowScan";
 import {
   extractIndexRecords,
   recordsFromShallow,
+  type IndexRecords,
   type IndexRecordXi,
 } from "./records";
+import {
+  buildReferenceIndex,
+  type ReferenceRecordSource,
+} from "./referenceIndex";
 import type {
   AssetDef,
   DefineDef,
@@ -55,6 +67,7 @@ import type {
   IndexedFile,
   ModIndex,
   ParsedFile,
+  ReferenceSite,
   SourceCandidate,
   StreamInfo,
 } from "./types";
@@ -110,6 +123,16 @@ export class ModIndexer {
   private assetsById = new Map<string, AssetDef[]>();
   private defines = new Map<string, DefineDef[]>();
   private files = new Map<string, IndexedFile>();
+  /**
+   * Records exactly as the current build's walk saw them (path -> records +
+   * content hash). The reverse reference index is built from this map, never
+   * from the shared records cache, so a watcher invalidation or a feature
+   * re-read (readDom) mid-build cannot desync references from assets.
+   */
+  private buildRecords = new Map<
+    string,
+    { file: string; records: IndexRecords; recordsHash: string }
+  >();
   private streams: StreamInfo[] = [];
   private manifests = new Map<string, ManifestInfo>();
   private sourceCandidates: SourceCandidate[] = [];
@@ -171,6 +194,20 @@ export class ModIndexer {
         rec.stat.birthtimeMs === st.birthtimeMs &&
         rec.stat.ctimeMs === st.ctimeMs
       ) {
+        // Force rebuilds (Re-index workspace) verify full-XML content even
+        // when every stat signal matches: external drives (FAT32/exFAT) can
+        // rewrite a file with the same size and coarse timestamps.
+        if (
+          this.opts.trustUnchanged === false &&
+          rec.kind === "full" &&
+          rec.contentHash
+        ) {
+          const text = stripBom(await readFile(path, "utf8"));
+          if (contentHash(text) === rec.contentHash) {
+            return this.recordsParsed(path, rec);
+          }
+          return this.parseFullXml(path, st, text);
+        }
         return this.recordsParsed(path, rec);
       }
       const hit = this.docs.get(key);
@@ -235,27 +272,7 @@ export class ModIndexer {
         return parsed;
       }
       const text = stripBom(await readFile(path, "utf8"));
-      const lineMap = new LineMap(text);
-      const parse = parseXml(text);
-      const records = extractIndexRecords(parse, lineMap);
-      const parsed: ParsedFile = {
-        file: {
-          path: resolve(path),
-          stat: {
-            mtimeMs: st.mtimeMs,
-            size: st.size,
-            birthtimeMs: st.birthtimeMs,
-            ctimeMs: st.ctimeMs,
-          },
-        },
-        parse,
-        records,
-        lineMap,
-      };
-      this.docs.set(parsed);
-      this.recordsCache.set(key, { stat: parsed.file.stat, records, kind: "full" });
-      this.files.set(key, parsed.file);
-      return parsed;
+      return this.parseFullXml(path, st, text);
     } catch {
       const parsed: ParsedFile = {
         file: { path: resolve(path), stat: null },
@@ -314,6 +331,40 @@ export class ModIndexer {
   }
 
   /**
+   * Parses a full XML document from its text, caches records (with a content
+   * hash) and the DOM, and registers the file in this build.
+   */
+  private parseFullXml(path: string, st: Stats, text: string): ParsedFile {
+    const key = normKey(path);
+    const lineMap = new LineMap(text);
+    const parse = parseXml(text);
+    const records = extractIndexRecords(parse, lineMap, text);
+    const parsed: ParsedFile = {
+      file: {
+        path: resolve(path),
+        stat: {
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+          birthtimeMs: st.birthtimeMs,
+          ctimeMs: st.ctimeMs,
+        },
+      },
+      parse,
+      records,
+      lineMap,
+    };
+    this.docs.set(parsed);
+    this.recordsCache.set(key, {
+      stat: parsed.file.stat,
+      records,
+      kind: "full",
+      contentHash: contentHash(text),
+    });
+    this.files.set(key, parsed.file);
+    return parsed;
+  }
+
+  /**
    * Reads a document and guarantees a DOM parse tree. Used for root-level
    * <xi:include> xpointer selection (rare) and by the document-local scope
    * (logical include expansion + precise definition locations).
@@ -341,27 +392,7 @@ export class ModIndexer {
       }
       if (st.size > MAX_PARSE_BYTES) return null;
       const text = stripBom(await readFile(path, "utf8"));
-      const lineMap = new LineMap(text);
-      const parse = parseXml(text);
-      const records = extractIndexRecords(parse, lineMap);
-      const parsed: ParsedFile = {
-        file: {
-          path: resolve(path),
-          stat: {
-            mtimeMs: st.mtimeMs,
-            size: st.size,
-            birthtimeMs: st.birthtimeMs,
-            ctimeMs: st.ctimeMs,
-          },
-        },
-        parse,
-        records,
-        lineMap,
-      };
-      this.docs.set(parsed);
-      this.recordsCache.set(key, { stat: parsed.file.stat, records, kind: "full" });
-      this.files.set(key, parsed.file);
-      return parsed;
+      return this.parseFullXml(path, st, text);
     } catch {
       return null;
     }
@@ -424,6 +455,7 @@ export class ModIndexer {
 
   async build(onPhase?: (index: ModIndex) => void | Promise<void>): Promise<ModIndex> {
     const start = Date.now();
+    this.buildRecords.clear();
     // Root list only; directories are listed lazily on first query, so the
     // XML phase does not pay an upfront recursive enumeration of the SDK.
     this.existence = buildExistenceSnapshot(this.searchPaths);
@@ -561,6 +593,15 @@ export class ModIndexer {
     for (const [id, defs] of this.assetsById) assetsById.set(id, defs.slice());
     const defines = new Map<string, DefineDef[]>();
     for (const [name, defs] of this.defines) defines.set(name, defs.slice());
+    const references = this.buildReferences();
+    const referenceCount = [...references.values()].reduce(
+      (sum, sites) => sum + sites.length,
+      0,
+    );
+    const recordsHashes = new Map<string, string>();
+    for (const [key, entry] of this.buildRecords) {
+      recordsHashes.set(key, entry.recordsHash);
+    }
 
     return {
       projectDir: resolve(this.opts.projectDir),
@@ -575,6 +616,8 @@ export class ModIndexer {
       manifests: new Map(this.manifests),
       sourceCandidates: this.sourceCandidates.slice(),
       diagnostics: this.diagnostics.slice(),
+      references,
+      recordsHashes,
       stats: {
         projectDir: resolve(this.opts.projectDir),
         sdkDir: resolve(this.opts.sdkDir),
@@ -596,6 +639,7 @@ export class ModIndexer {
         walkMs: this.timings.walkMs,
         artScanMs: this.timings.artScanMs,
         assetCount: [...this.assets.values()].reduce((sum, byId) => sum + byId.size, 0),
+        referenceCount,
         defineCount: this.defines.size,
         manifestFiles: this.manifests.size,
         manifestAssetCount,
@@ -604,6 +648,38 @@ export class ModIndexer {
         elapsedMs: Date.now() - startedAt,
       },
     };
+  }
+
+  /**
+   * Resolves the per-file reference records collected during this build
+   * against the current asset maps. Only files touched by this build are
+   * included, so stale cache entries for files that left the include graph
+   * never leak into the reverse index.
+   */
+  private buildReferences(): Map<string, ReferenceSite[]> {
+    const sources: ReferenceRecordSource[] = [];
+    for (const { file, records } of this.buildRecords.values()) {
+      sources.push({ file, records });
+    }
+    return buildReferenceIndex(sources, {
+      assets: this.assets,
+      assetsById: this.assetsById,
+    });
+  }
+
+  /**
+   * Remembers the records exactly as this build saw them (plus the content
+   * hash when the file was fully parsed / cached with one), so snapshots can
+   * build references from the same source of truth as the asset maps.
+   */
+  private noteBuildRecords(parsed: ParsedFile): void {
+    if (!parsed.records) return;
+    const key = normKey(parsed.file.path);
+    this.buildRecords.set(key, {
+      file: parsed.file.path,
+      records: parsed.records,
+      recordsHash: recordsHash(parsed.records),
+    });
   }
 
   // ── Include walk ──────────────────────────────────────────────────
@@ -670,6 +746,7 @@ export class ModIndexer {
   ): Promise<void> {
     const records = parsed.records;
     if (!records) return;
+    this.noteBuildRecords(parsed);
     const file = parsed.file.path;
     const origin = this.originOf(file);
 

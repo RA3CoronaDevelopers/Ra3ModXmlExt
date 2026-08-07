@@ -59,7 +59,7 @@ export async function buildDocumentScope(
   const lineMap = new LineMap(text);
   const parse = parseXml(text);
   const builder = new OverlayBuilder(ctx);
-  await builder.addEntry(uri, parse, lineMap);
+  await builder.addEntry(uri, parse, lineMap, text);
 
   const expanded = await expandDocument(uri, parse, {
     resolve: (source, currentDir) =>
@@ -115,6 +115,8 @@ export function withLocalOverlay(
       manifests: new Map(),
       sourceCandidates: [],
       diagnostics: [],
+      references: new Map(),
+      recordsHashes: new Map(),
       stats: {
         projectDir,
         sdkDir,
@@ -134,6 +136,7 @@ export function withLocalOverlay(
         walkMs: 0,
         artScanMs: 0,
         assetCount: 0,
+        referenceCount: 0,
         defineCount: 0,
         manifestFiles: 0,
         manifestAssetCount: 0,
@@ -164,12 +167,13 @@ class OverlayBuilder {
     path: string,
     parse: XmlDocument,
     lineMap: LineMap,
+    text: string,
   ): Promise<void> {
     this.lineMaps.set(scopePathKey(path), lineMap);
     await this.addParsed({
       file: { path: resolve(path), stat: null },
       parse,
-      records: extractIndexRecords(parse, lineMap),
+      records: extractIndexRecords(parse, lineMap, text),
       lineMap,
     }, 0);
   }

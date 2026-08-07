@@ -10,6 +10,7 @@
  */
 
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 import type { IndexedFile, ParsedFile } from "./types";
 import type { IndexRecords } from "./records";
 import type { ResolveResult } from "./includeResolver";
@@ -17,6 +18,28 @@ import type { ResolveResult } from "./includeResolver";
 /** Case-insensitive absolute path key. */
 export function normKey(path: string): string {
   return resolve(path).toLowerCase();
+}
+
+/**
+ * SHA-1 of the BOM-stripped text a file's records were extracted from.
+ * Lets force rebuilds verify that a stat-matching cache entry is not stale
+ * (FAT32/exFAT timestamps can match after a rewrite), and lets features
+ * detect "open document != indexed snapshot" without reading the whole index.
+ */
+export function contentHash(text: string): string {
+  return createHash("sha1").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Hash of a file's compact index records. Semantic records (assets, defines,
+ * includes, references) are what the index actually consumes, so comparing
+ * records hashes ignores cosmetic text changes (line endings, whitespace)
+ * and only fires the self-heal when the index would really be out of date.
+ */
+export function recordsHash(records: IndexRecords): string {
+  return createHash("sha1")
+    .update(JSON.stringify(records), "utf8")
+    .digest("hex");
 }
 
 /**
@@ -119,6 +142,12 @@ export interface IndexRecordsCacheEntry {
   records: IndexRecords;
   /** "shallow" for art-asset scans (.w3x), "full" for parsed XML. */
   kind: "shallow" | "full";
+  /**
+   * Hash of the BOM-stripped file text (full parses only). Absent for
+   * shallow scans (avoid hashing multi-MB model files) and for cache entries
+   * produced before this field existed.
+   */
+  contentHash?: string;
 }
 
 /**

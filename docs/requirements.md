@@ -86,9 +86,21 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
   美术资产目录（Corona 约 2.6 GB）；索引记录与 include 解析结果同样跨重建缓存，
   保存触发的重建零 stat、零重读（Corona 实测约 2 秒）。
 
+**补充（引用计数、语义 Find All References 与未引用资产，2026-08-05）**：
+- 每个顶部 asset 显示被引用次数（CodeLens，0 也显示），点击直接打开
+  references peek；只在“设计上应被引用”的类型上显示，避免设置类/地图元数据/
+  w3x 子结构等自动注册类型制造满屏 0；
+- Find All References 改为基于语义引用索引（属性引用 + simple-content 文本 +
+  `inheritFrom`，排除 id 定义点 / Poid / `$DEFINE`），不再全文搜索；
+- 命令 `Find unreferenced assets…`：按类型列出所有零引用的项目定义并跳转；
+  编辑器右键菜单 `Find unreferenced assets of this type` 预选光标所在类型；
+- 设计文档见 `docs/features-reference-counts.md`。
+
 ### P1：非近期目标（本期不做，但预留扩展点）
 
 6. **高效搜索**：Mod 项目巨大（Corona 约 7500 个 XML、38MB）时直接全文搜索很慢，需要一个高效的 XML 内容索引机制。
+   （2026-08-05：语义引用索引已落地，FAR / 引用计数 / 未引用报告不再全文搜索；
+   通用内容搜索与索引复用仍属远期。）
 7. **索引机制的复用性**：希望索引不仅能服务 VS Code 插件，也能被其他工具（如搜索、静态分析）复用，因此索引/解析核心应设计成与编辑器无关的纯模块。
 
 ## 三、环境与参考资源

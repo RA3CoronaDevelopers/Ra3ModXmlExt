@@ -14,6 +14,7 @@ import {
   resolveReferenceTargetsForType,
   type ReferenceTarget,
 } from "../indexer/refs";
+import { findReferenceLocations } from "./references";
 import {
   findContainingGameObject,
   findLocalId,
@@ -163,6 +164,18 @@ async function assetDefLocation(
   scope: DocumentScope,
   currentDocument: vscode.TextDocument,
 ): Promise<vscode.Location | null> {
+  // While a rebuild is running, avoid readDom() mutating the live indexer's
+  // caches mid-build; a line-based location is a fine temporary fallback.
+  if (ws.isBuilding) {
+    const line = Math.max(0, def.line - 1);
+    return new vscode.Location(
+      vscode.Uri.file(def.file),
+      new vscode.Range(
+        new vscode.Position(line, 0),
+        new vscode.Position(line, 1),
+      ),
+    );
+  }
   if (def.origin === "manifest") {
     const src = def.manifestSource;
     if (src?.toUpperCase().startsWith("DATA:")) {
@@ -278,56 +291,7 @@ export class Ra3ReferenceProvider implements vscode.ReferenceProvider {
     _context: vscode.ReferenceContext,
     _token: vscode.CancellationToken,
   ): Promise<vscode.Location[] | null> {
-    if (!this.ws.isRa3Workspace()) return null;
-    const text = document.getText();
-    const offset = document.offsetAt(position);
-    const doc = parseXml(text);
-    const el = findElementAt(doc, offset);
-    if (!el) return null;
-    const attr = el.attrs.find(
-      (a) =>
-        (a.hasValue && offset >= a.valueStart && offset <= a.valueEnd) ||
-        (offset >= a.nameStart && offset <= a.nameEnd),
-    );
-    let id: string | null = null;
-    if (attr?.hasValue) {
-      id = attr.value;
-    } else {
-      // Element text content (e.g. <CreateObject>CrateDebris_01</CreateObject>).
-      const elType = resolveElementType(el);
-      const token = textContentTokenAt(text, el, offset);
-      if (token && isReferenceContentType(elType) && !token.value.startsWith("$")) {
-        id = token.value;
-      }
-    }
-    if (!id || id.startsWith("$")) return null;
-
-    const locations: vscode.Location[] = [];
-    // Matches both attribute values ("id" / 'id') and simple-content
-    // references (>id<); the outer delimiters are stripped from the result
-    // range below so the returned locations cover just the id.
-    const pattern = `(?:["']|>)[ \\t]*${escapeRegExp(id)}[ \\t]*(?:["']|<)`;
-    await findTextInWorkspace(
-      { pattern, isRegExp: true },
-      { include: "**/*.xml", maxResults: 2000 },
-      (result: { uri: vscode.Uri; matches: { range: vscode.Range }[] }) => {
-        if (!result.uri) return;
-        for (const m of result.matches) {
-          const start = m.range.start;
-          const end = m.range.end;
-          locations.push(
-            new vscode.Location(
-              result.uri,
-              new vscode.Range(
-                new vscode.Position(start.line, start.character + 1),
-                new vscode.Position(end.line, end.character - 1),
-              ),
-            ),
-          );
-        }
-      },
-    );
-    return locations.length ? locations : null;
+    return findReferenceLocations(this.ws, document, position);
   }
 }
 
@@ -434,41 +398,4 @@ export class Ra3DocumentSymbolProvider implements vscode.DocumentSymbolProvider 
 function localName(tag: string): string {
   const idx = tag.lastIndexOf(":");
   return idx >= 0 ? tag.slice(idx + 1) : tag;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * `workspace.findTextInFiles` is a stable VS Code API (since 1.66) but is
- * missing from the published typings, so we declare the subset we need and
- * call it via a safe cast.
- */
-interface TextSearchQuery {
-  pattern: string;
-  isRegExp?: boolean;
-  isCaseSensitive?: boolean;
-  isWordMatch?: boolean;
-}
-
-interface TextSearchOptions {
-  include?: string;
-  exclude?: string;
-  maxResults?: number;
-}
-
-function findTextInWorkspace(
-  query: TextSearchQuery,
-  options: TextSearchOptions,
-  callback: (result: { uri: vscode.Uri; matches: { range: vscode.Range }[] }) => void,
-): Promise<void> {
-  const api = vscode.workspace as unknown as {
-    findTextInFiles(
-      query: TextSearchQuery,
-      options: TextSearchOptions,
-      callback: (result: { uri: vscode.Uri; matches: { range: vscode.Range }[] }) => void,
-    ): Promise<unknown>;
-  };
-  return api.findTextInFiles(query, options, callback).then(() => undefined);
 }

@@ -24,7 +24,7 @@ test("extractIndexRecords mirrors the walk semantics", () => {
   </GameObject>
 </AssetDeclaration>`;
   const lineMap = new LineMap(text);
-  const records = extractIndexRecords(parseXml(text), lineMap);
+  const records = extractIndexRecords(parseXml(text), lineMap, text);
   assert.deepEqual(
     records.assets.map((a) => [a.type, a.id, a.line]),
     [
@@ -62,4 +62,54 @@ test("recordsFromShallow converts offsets to 1-based lines", () => {
   assert.equal(records.assets[0].type, "W3DContainer");
   assert.equal(records.assets[0].id, "A");
   assert.equal(records.assets[0].line, 2);
+  assert.deepEqual(records.references, []);
+});
+
+test("extractIndexRecords records typed references and skips non-references", () => {
+  const text = `<AssetDeclaration>
+  <GameObject id="Tank" CommandSet="CS" inheritFrom="Base" KindOf="SELECTABLE"/>
+  <ObjectCreationList id="OCL">
+    <CreateObject>
+      <CreateObject>Tank</CreateObject>
+    </CreateObject>
+  </ObjectCreationList>
+  <CameraSettings id="S"/>
+</AssetDeclaration>`;
+  const lineMap = new LineMap(text);
+  const records = extractIndexRecords(parseXml(text), lineMap, text);
+
+  const attrs = records.references.filter((r) => r.kind === "attr");
+  const content = records.references.filter((r) => r.kind === "content");
+
+  // Typed attribute reference keeps the XSD refType.
+  const cs = attrs.find((r) => r.value === "CS");
+  assert.ok(cs, "CommandSet reference is recorded");
+  assert.equal(cs.refType, "LogicCommandSet");
+  assert.equal(cs.selfType, null);
+  assert.equal(cs.line, 2);
+  assert.equal(records.references.some((r) => r.start === cs.start && r.end === cs.end), true);
+
+  // inheritFrom records the element type as selfType instead of refType.
+  const base = attrs.find((r) => r.value === "Base");
+  assert.ok(base, "inheritFrom reference is recorded");
+  assert.equal(base.refType, null);
+  assert.equal(base.selfType, "GameObject");
+
+  // Enums and non-reference values are not references.
+  assert.equal(attrs.some((r) => r.value === "SELECTABLE"), false);
+
+  // Simple-content text is recorded with its content refType and offsets.
+  const tank = content.find((r) => r.value === "Tank");
+  assert.ok(tank, "content reference is recorded");
+  assert.equal(tank.refType, "GameObject");
+  const line = text.split("\n")[4];
+  assert.equal(line.slice(tank.start - text.indexOf(line), tank.end - text.indexOf(line)), "Tank");
+
+  // The id definition itself is never recorded as a reference.
+  assert.equal(
+    records.references.some(
+      (r) => r.value === "Tank" && r.kind === "attr",
+    ),
+    false,
+  );
 });

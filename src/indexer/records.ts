@@ -12,6 +12,12 @@
 
 import type { LineMap, XmlDocument } from "../language/xmlParser";
 import type { ShallowDocument } from "./shallowScan";
+import { attributesOfType, typeInfo } from "../model/schemaModel";
+import { resolveElementType } from "../language/typeContext";
+import {
+  isReferenceAttributeOfType,
+  isReferenceContentType,
+} from "./refs";
 
 export interface IndexRecordAsset {
   /** Top-level element name, e.g. "W3DContainer". */
@@ -42,6 +48,27 @@ export interface IndexRecordXi {
   line: number;
 }
 
+export interface IndexRecordReference {
+  /** "attr" for attribute values, "content" for simple-content text. */
+  kind: "attr" | "content";
+  /**
+   * XSD reference target type (from `xas:refType`), or null for untyped
+   * `isRef` references and `inheritFrom` (which filters by the element's own
+   * type via `selfType`).
+   */
+  refType: string | null;
+  /** Element type used by `inheritFrom` filtering; null otherwise. */
+  selfType: string | null;
+  /** The referenced id text (whole attribute value / trimmed content). */
+  value: string;
+  /** 1-based line of the value. */
+  line: number;
+  /** Character offset of the value start (relative to the file text). */
+  start: number;
+  /** Character offset one past the value end. */
+  end: number;
+}
+
 export interface IndexRecords {
   assets: IndexRecordAsset[];
   defines: IndexRecordDefine[];
@@ -50,6 +77,8 @@ export interface IndexRecords {
   rootXiIncludes: IndexRecordXi[];
   /** <xi:include> elements nested anywhere else in the document. */
   nestedXiIncludes: IndexRecordXi[];
+  /** Typed global-asset references (attribute values + simple content). */
+  references: IndexRecordReference[];
 }
 
 const INCLUDE_TYPES = new Set(["all", "instance", "reference"]);
@@ -69,14 +98,21 @@ function localName(tag: string): string {
  * Tags/Includes/Defines), $DEFINE constants, the top-level <Includes> block
  * and root/nested <xi:include> elements.
  */
-export function extractIndexRecords(parse: XmlDocument, lineMap: LineMap): IndexRecords {
+export function extractIndexRecords(
+  parse: XmlDocument,
+  lineMap: LineMap,
+  text: string,
+): IndexRecords {
   const assets: IndexRecordAsset[] = [];
   const defines: IndexRecordDefine[] = [];
   const includes: IndexRecordInclude[] = [];
   const rootXiIncludes: IndexRecordXi[] = [];
   const nestedXiIncludes: IndexRecordXi[] = [];
+  const references: IndexRecordReference[] = [];
   const root = parse.root;
-  if (!root) return { assets, defines, includes, rootXiIncludes, nestedXiIncludes };
+  if (!root) {
+    return { assets, defines, includes, rootXiIncludes, nestedXiIncludes, references };
+  }
 
   for (const child of root.children) {
     const local = localName(child.name);
@@ -142,7 +178,86 @@ export function extractIndexRecords(parse: XmlDocument, lineMap: LineMap): Index
     });
   }
 
-  return { assets, defines, includes, rootXiIncludes, nestedXiIncludes };
+  collectReferenceRecords(parse, lineMap, text, references);
+
+  return { assets, defines, includes, rootXiIncludes, nestedXiIncludes, references };
+}
+
+/**
+ * Walks every element of a fully parsed document and records typed
+ * global-asset references: reference attributes, `inheritFrom` and
+ * simple-content reference text. Local `id` definitions, Poid pipeline-local
+ * references and `$DEFINE`/`=` values are intentionally skipped (the same
+ * semantics as diagnostics / hover / navigation).
+ *
+ * The stored `refType` / `selfType` pair is exactly what
+ * `resolveReferenceTargetsForType` derives from the element context, so the
+ * reverse reference index can resolve these records after the whole index is
+ * built without re-walking the document or re-resolving element types.
+ */
+function collectReferenceRecords(
+  parse: XmlDocument,
+  lineMap: LineMap,
+  text: string,
+  out: IndexRecordReference[],
+): void {
+  for (const el of parse.elements) {
+    const elType = resolveElementType(el);
+
+    for (const attr of el.attrs) {
+      if (!attr.hasValue) continue;
+      if (!isReferenceAttributeOfType(elType, attr.name)) continue;
+      const value = attr.value;
+      if (!value || value.startsWith("$") || value.startsWith("=")) continue;
+      let refType: string | null = null;
+      let selfType: string | null = null;
+      if (attr.name.toLowerCase() === "inheritfrom") {
+        selfType = elType;
+      } else if (elType) {
+        refType =
+          attributesOfType(elType).find((a) => a.name === attr.name)?.refType ??
+          null;
+      }
+      out.push({
+        kind: "attr",
+        refType,
+        selfType,
+        value,
+        line: lineOf(lineMap, attr.valueStart),
+        start: attr.valueStart,
+        end: attr.valueEnd,
+      });
+    }
+
+    if (
+      elType &&
+      isReferenceContentType(elType) &&
+      !el.selfClosing &&
+      el.closeTagStart >= 0
+    ) {
+      const raw = text.slice(el.startTagEnd, el.closeTagStart);
+      const value = raw.trim();
+      if (
+        !value ||
+        value.startsWith("$") ||
+        value.startsWith("=") ||
+        value.includes("<")
+      ) {
+        continue;
+      }
+      const start = el.startTagEnd + raw.indexOf(value);
+      const info = typeInfo(elType);
+      out.push({
+        kind: "content",
+        refType: info?.kind === "simple" ? info.refType : null,
+        selfType: null,
+        value,
+        line: lineOf(lineMap, start),
+        start,
+        end: start + value.length,
+      });
+    }
+  }
 }
 
 /** Converts a shallow scan (offsets) into index records (1-based lines). */
@@ -173,5 +288,6 @@ export function recordsFromShallow(scan: ShallowDocument, lineMap: LineMap): Ind
       xpointer: x.xpointer,
       line: lineOf(lineMap, x.start),
     })),
+    references: [],
   };
 }

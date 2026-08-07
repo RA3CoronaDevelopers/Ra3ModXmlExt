@@ -52,7 +52,7 @@ test("IndexRecordsCache stores and invalidates entries", () => {
   const cache = new IndexRecordsCache();
   const entry = {
     stat,
-    records: { assets: [], defines: [], includes: [], rootXiIncludes: [], nestedXiIncludes: [] },
+    records: { assets: [], defines: [], includes: [], rootXiIncludes: [], nestedXiIncludes: [], references: [] },
     kind: "full",
   };
   cache.set("a.xml", entry);
@@ -65,7 +65,7 @@ test("IndexRecordsCache exposes entries for disk persistence", () => {
   const cache = new IndexRecordsCache();
   const entry = {
     stat,
-    records: { assets: [], defines: [], includes: [], rootXiIncludes: [], nestedXiIncludes: [] },
+    records: { assets: [], defines: [], includes: [], rootXiIncludes: [], nestedXiIncludes: [], references: [] },
     kind: "full",
   };
   cache.set("a.xml", entry);

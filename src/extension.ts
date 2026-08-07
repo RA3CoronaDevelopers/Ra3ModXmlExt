@@ -8,6 +8,12 @@ import {
   Ra3DocumentSymbolProvider,
   Ra3ReferenceProvider,
 } from "./features/navigation";
+import { Ra3CodeLensProvider } from "./features/codeLens";
+import { showReferencesForDef } from "./features/references";
+import {
+  findUnreferencedAssets,
+  findUnreferencedAssetsOfType,
+} from "./features/unreferenced";
 import { Ra3Diagnostics } from "./features/diagnostics";
 import {
   Ra3SemanticTokensProvider,
@@ -61,6 +67,12 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
   context.subscriptions.push(
+    vscode.languages.registerCodeLensProvider(
+      XML_SELECTOR,
+      new Ra3CodeLensProvider(ws),
+    ),
+  );
+  context.subscriptions.push(
     vscode.languages.registerDocumentSemanticTokensProvider(
       XML_SELECTOR,
       new Ra3SemanticTokensProvider(ws),
@@ -73,6 +85,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // Refresh diagnostics for every open XML document whenever a new index
   // snapshot is published (XML phase, art phase, stale/final rebuild).
   ws.onIndexUpdate = () => {
+    void vscode.commands.executeCommand("editor.action.codeLens.refresh");
     for (const doc of vscode.workspace.textDocuments) {
       if (doc.languageId === "xml") void diagnostics.update(doc);
     }
@@ -177,6 +190,7 @@ export function activate(context: vscode.ExtensionContext): void {
           `Project: ${s.projectDir}\n` +
           `Files: ${s.indexedFiles} (${s.parsedFiles} parsed, ${s.shallowScannedFiles} shallow-scanned, ${s.shallowCacheHits + s.recordsCacheHits} cache hits)\n` +
           `Assets: ${s.assetCount} (${s.manifestAssetCount} from ${s.manifestFiles} manifests)\n` +
+          `References: ${s.referenceCount}\n` +
           `Defines: ${s.defineCount} · Streams: ${s.streams} · Candidates: ${s.sourceCandidates}\n` +
           `Phase: ${s.phase} · Complete: ${s.complete}${stale}\n` +
           `Build #${ws.buildCount} (trigger: ${ws.lastTrigger})\n` +
@@ -185,6 +199,25 @@ export function activate(context: vscode.ExtensionContext): void {
         { modal: false },
       );
     }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "ra3modxml.showReferences",
+      (args: Parameters<typeof showReferencesForDef>[1]) =>
+        void showReferencesForDef(ws, args),
+    ),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "ra3modxml.findUnreferencedAssets",
+      () => void findUnreferencedAssets(ws),
+    ),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "ra3modxml.findUnreferencedAssetsOfType",
+      () => void findUnreferencedAssetsOfType(ws),
+    ),
   );
 
   void ws.initialize();

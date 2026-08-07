@@ -974,7 +974,8 @@ stale=true 并触发 follow-up。处理（按用户建议的扩展名白名单�
 
 - w3x 文件名启发式定向扫描（按约定后续再做）。
 - `AssetIdList` 等“任意资产 ID 列表”的引用语义建模。
-- Find All References 目前仍是全文搜索，未走索引（对应需求 P1 高效搜索）。
+- Find All References 已改为语义引用索引（第十八轮，2026-08-05，见
+  `docs/features-reference-counts.md`）；通用内容搜索与索引复用仍属 P1 远期。
 
 ---
 
@@ -1509,3 +1510,117 @@ XSD 模型中共 **371 处“子元素是 simple type”的声明（149 个不�
 若 Corona 上“输入 C 后菜单出现慢”仍然明显，下一个瓶颈大概率是
 `getScope()` 每次文档版本变化都重建完整局部 include 链 / 逻辑树；本轮先把
 候选截断与类型过滤造成的“列表错误”修掉，局部 scope 缓存优化留作独立一轮。
+
+---
+
+## 二十三、问题分析（2026-08-05）：FAR 把定义行算作“自引用”；CodeLens 漏掉 manifest 源引用
+
+### 问题 1：Find All References 把 id 定义行也算进结果
+
+**现象**：对任意资产执行 FAR，结果里包含它自己的 `id="..."` 定义行，看起来
+像“自己引用自己”；CodeLens 计数没有这个问题。
+
+**根因**：VS Code 的 FAR 默认带 `context.includeDeclaration = true`，旧实现
+把定义位置附加进返回结果。语义反向索引本身不含 id 定义点（records 提取时
+已排除），CodeLens 只读反向索引，所以两者不一致。
+
+**修复**：`findReferenceLocations` 不再附加定义位置，无论 `includeDeclaration`
+取值；FAR 结果与 CodeLens 计数严格一致。
+
+### 问题 2：CodeLens 不显示 manifest 定义的引用，FAR 却显示
+
+**现象**：打开 SageXml 原版源码时，CodeLens 显示 0 引用，但从该资产执行
+FAR 能看到引用。
+
+**根因**：反向索引的站点挂在“实际解析到的定义”上。当 SageXml 源码不在
+include 遍历里时，引用只解析到 manifest 定义（如 `static.manifest` 条目），
+站点挂在 manifest key；CodeLens 用“当前文档定义 key”精确查表所以是 0，
+FAR 把同 id/同类型的 manifest 定义也合并进来所以能看到。
+
+**修复**：新增 `referenceSitesForDefinition`：除了精确 key，还把
+`manifestSource` 可解析到当前打开文件的 manifest 定义的站点并入计数——
+语义上把“manifest 引用”视作“SageXml 源码对该 asset 的引用”
+（Go to Definition 本来就会把 manifest 定义映射到 SageXml 源码）。
+
+**验证**：AttachTest 中 326 个带引用的 manifest 定义此前全部没有对应
+`origin: "sdk"` 定义（源码未遍历），现在打开对应 SageXml 源码即可看到计数
+（如 `PlayerTemplate Allies` → 8 引用）。
+
+### 举一反三的测试（146 → 147 全绿）
+
+- `referenceProvider.test.mjs`：FAR 即使 `includeDeclaration = true` 也不返回
+  定义行；从引用位置发起 FAR 结果一致；
+- `referenceIndex.test.mjs`：`referenceSitesForDefinition` 把 manifest 源
+  站点并入 SageXml 源码定义，其他文件不串；
+- `codeLens.test.mjs`：打开 manifestSource 对应的源码文件时，CodeLens 显示
+  manifest 定义上挂着的引用数。
+
+版本 **0.1.16 → 0.1.17**。
+
+---
+
+## 二十四、问题分析（2026-08-06）：引用索引与 records 缓存不同步 / 竞争
+
+### 现象
+
+Corona `Data/GlobalData/Weapon/Weapon_Allied.xml` 中的
+`AlliedCommandoDesertEaglesWarhead`（一个 WeaponTemplate）偶尔没有 CodeLens，
+FAR 显示无引用；它实际被同文件 WeaponTemplate 的 `ProjectileNugget
+WarheadTemplate="..."` 引用。该问题在移动硬盘重连 + 重新打开工作区 + 校验
+磁盘缓存 + 重新 indexing 之后出现；在 ProjectileNugget 里 Ctrl+点击一次后恢复；
+清缓存重载不复发。
+
+### 调查
+
+1. **模型核对**：`AlliedCommandoDesertEaglesWarhead` 的元素是
+   `<WeaponTemplate>`，`ProjectileNuggetType@WarheadTemplate` 的 refType 是
+   `WeaponTemplate`，语义匹配成立。
+2. **真实文件验证**：直接对 Weapon_Allied.xml 做 records 提取 + 反向索引，
+   引用记录（line 1332）能正确挂到定义（line 1341）——**新鲜构建没有问题**。
+3. 因此问题不在提取/过滤逻辑，而在“引用索引与索引状态不同步”的缓存/竞争
+   路径。
+
+### 找到的不同步 / 竞争点
+
+- **`buildReferences()` 读共享 recordsCache**（workspace 持有、跨重建复用），
+  而不是 walk 实际消费的 records：
+  - 外部盘重连 / 旧磁盘缓存条目“stat 全匹配但内容过时”（FAT32/exFAT 时间戳
+    粒度 2s、同步工具保留 mtime、size 不变）→ 资产用旧 records 入库，而新
+    引用缺失；watcher 事件在重连期间丢失时快照不会标 stale → 持久化问题；
+  - 构建中途 watcher 失效、或 feature `readDom` 重写 recordsCache，都可能让
+    快照的 references 与 assets 来自不同版本的 records。
+- **feature 在构建中调用 `readDom`**（定义跳转的精确定位）会改写同一个
+  indexer 的 `files` / `recordsCache`，污染进行中的构建。
+- **force 重建（Re-index）之前只比 stat 信号**：stat 相同但内容不同的陈旧
+  条目会被直接复用，只有清缓存才能修复。
+
+### 修复
+
+1. **构建期本地 records**：`ModIndexer.buildRecords` 记录本次 walk 实际消费的
+   `{ file, records, recordsHash }`，`buildReferences()` 只从这里构建反向索引。
+   中途失效 / feature 重读不再造成“资产在但引用缺失”。
+2. **构建期 readDom 闸门**：`assetDefLocation` 在 `ws.isBuilding` 时退化为
+   行级位置，避免定义跳转改写进行中的构建。
+3. **force 重建内容校验**：full XML 的 records 缓存条目带 `contentHash`；
+   `Re-index workspace` 对 stat 匹配的条目也读文件比对哈希，不一致才重解析
+   （w3x 浅扫描不读，保持 2.6 GB 免读）。
+4. **打开文档自愈**：快照发布每文件 `recordsHashes`；CodeLens / FAR 对**已保存**
+   文档比较当前文本的 records 哈希，不一致则定向 `invalidate` +
+   `scheduleRebuild("records-desync")`。records 哈希忽略行尾/空白差异，
+   未保存编辑不触发，避免误报和循环。
+5. **磁盘缓存 v2 → v3**：旧缓存没有哈希、无法校验/自愈，一次性重建后每文件
+   都带哈希。
+
+### 验证（147 → 151 全绿）
+
+- 构建中途 invalidate 某文件的 recordsCache，最终快照仍保留该文件的引用；
+- force 重建：stat 全匹配但 contentHash 不同的条目被重新解析（trusted 路径
+  仍复用缓存不读盘）；
+- 自愈：records 哈希不一致时只对干净文件触发 invalidate + records-desync；
+- CodeLens 集成：打开文档与快照不同步时调度定向重建。
+
+“Ctrl+点击后恢复”的精确时序无法在代码里复现；最可能是跳转前后恰好发生了一
+次重建（watcher 事件 / dirty-followup）。自愈检查让这类问题不再依赖巧合：
+只要文件被打开并触发 CodeLens / FAR，不一致就会被检测并定向修复。
+
+版本 **0.1.17 → 0.1.18**。
