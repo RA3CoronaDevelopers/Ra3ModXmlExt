@@ -2,7 +2,7 @@
   "name": "ra3-mod-xml",
   "displayName": "%ra3modxml.displayName%",
   "description": "%ra3modxml.description%",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "publisher": "lanyi",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {

@@ -99,6 +99,54 @@ test("logical xi:include expansion gives included modules their Draws context", 
   assert.ok(localIds.includes("ModuleTag_Headlight"));
 });
 
+test("xi:include without xpointer splices the target root element itself", async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), "ra3-local-noxpointer-"));
+  t.after(() => rm(tmp, { recursive: true, force: true }));
+  const dataDir = join(tmp, "Data");
+  const includesDir = join(dataDir, "Includes");
+  await mkdir(includesDir, { recursive: true });
+  const mainPath = join(dataDir, "Main.xml");
+  const fragmentPath = join(includesDir, "Fragment.xml");
+  await writeFile(
+    fragmentPath,
+    '<CreateObjectDie xmlns="uri:ea.com:eala:asset" id="ModuleTag_X" CreationList="OCL_X"><DieMuxData DeathTypes="SUICIDED"/></CreateObjectDie>',
+    "utf8",
+  );
+  await writeFile(
+    mainPath,
+    '<AssetDeclaration xmlns="uri:ea.com:eala:asset" xmlns:xi="http://www.w3.org/2001/XInclude">' +
+      '<GameObject id="G"><Behaviors><xi:include href="DATA:Includes/Fragment.xml"/></Behaviors></GameObject>' +
+      "</AssetDeclaration>",
+    "utf8",
+  );
+  const searchPaths = buildSearchPaths(sdk, tmp);
+  const text = await readFile(mainPath, "utf8");
+  const scope = await buildDocumentScope(mainPath, text, 1, {
+    projectDir: tmp,
+    sdkDir: sdk,
+    searchPaths,
+    readRecords: readParsed,
+    readDom: readParsed,
+  });
+  const behaviors = scope.expanded.elements.find((e) => e.name === "Behaviors");
+  assert.ok(behaviors, "Behaviors exists");
+  assert.equal(behaviors.children.length, 1);
+  const module = behaviors.children[0];
+  assert.equal(module.name, "CreateObjectDie");
+  assert.equal(
+    module.attrs.find((a) => a.name === "id")?.value,
+    "ModuleTag_X",
+  );
+  assert.match(module.sourceFile, /Fragment\.xml$/i);
+  const dieMux = scope.expanded.elements.find((e) => e.name === "DieMuxData");
+  assert.ok(dieMux, "DieMuxData is expanded");
+  assert.equal(
+    dieMux.parent,
+    module,
+    "DieMuxData stays inside the included CreateObjectDie module",
+  );
+});
+
 test("local overlay wins over a global definition with the same id", async () => {
   const scope = await makeScope();
   const global = {

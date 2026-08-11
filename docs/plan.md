@@ -464,7 +464,7 @@ test/
   展开（第十二轮，见第六节）；顶层 `<Include type="all">` 与 `inheritFrom` +
   `xai:joinAction` 的深合并仍未实现，后续如需要“当前文档视角的全量合并诊断”再继续。
 
-## 六、include 展开设计备忘（2026-08-01；xi:include 部分已实施于第十二轮）
+## 六、include 展开设计备忘（2026-08-01；xi:include 部分已实施于第十二轮，无 xpointer 语义与片段诊断见第二十八轮）
 
 > 目的：集中记录 include 处理相关的现状、结论与设计，下次遇到 include 问题时从这里继续，
 > 并在实施后把结果回写本节。
@@ -477,7 +477,8 @@ test/
 | `reference` → builtmods manifest 解析 / 缺失回退占位 XML | 已实现 |
 | 嵌套 `xi:include`（任意层级）：目标可索引、缺失报 `include-not-found`、Ctrl+点击跳转、`href` hover 解析目标 | 已实现（第二轮 + 第五轮） |
 | `xi:include` 及其属性不参与 XSD 校验（外来命名空间守卫 `isXsdElementName` / `isXsdAttributeName`） | 已实现（第五轮） |
-| include 目标内容“虚拟合并”进父文档的逻辑树 | 已实现 `xi:include`（第十二轮）；顶层 `<Include type="all">` 仍不展开 |
+| include 目标内容“虚拟合并”进父文档的逻辑树 | 已实现 `xi:include`（第十二轮）；**无 `xpointer` 时整体包含目标根元素**（第二十八轮修正）；顶层 `<Include type="all">` 仍不展开 |
+| 片段文件（根非 `AssetDeclaration`）的诊断 | 已实现 P0（第二十八轮）：跳过顶层 id/重复/引用/define 检查；根为已知 XSD 元素时仍校验子树；根未知时只报语法与 include 缺失 |
 
 ### 2. 已确认的方向
 
@@ -488,9 +489,11 @@ BAB（`defaultscript.cs`）编译时正是这样把整个 Mod 合并成一份大
 
 - **不要**把 include 目标展开成文本再整体重新解析：源码偏移会断裂，诊断 / 跳转 / hover /
   补全全部无法映射回原始文件。
-- **要做**的是：解析器逐文件解析（现状不变）；展开器把目标文件选中节点按 `xpointer`
-  子集挂进父元素，节点保留各自的源文件与原始偏移（来源追溯）。后续分析跑在逻辑树上，
-  范围映射按节点 `sourceFile` 回到对应文件的 lineMap。
+- **要做**的是：解析器逐文件解析（现状不变）；展开器把目标文件选中节点挂进父元素——
+  有 `xpointer` 时取 `/n:Name/child::*` 选中 children，无 `xpointer` 时按 XInclude 语义
+  整体包含目标根元素（RA3 片段如 `CreateObjectDie` 依赖这一行为）；节点保留各自的源文件
+  与原始偏移（来源追溯）。后续分析跑在逻辑树上，范围映射按节点 `sourceFile` 回到对应
+  文件的 lineMap。
 - 现有 `parseXml` 已记录标签 / 属性 / 值的起止偏移，`XmlElement` 结构可直接复用；拼接时
   用浅拷贝节点壳并重建 parent 链，避免破坏目标文件缓存树自身的 parent 指针。
 
@@ -498,7 +501,7 @@ BAB（`defaultscript.cs`）编译时正是这样把整个 Mod 合并成一份大
 
 | 构造 | 拼入逻辑树 | 理由 |
 |---|---|---|
-| `xi:include` | ✅ | 内容并入父元素（HeadlightDraw2 场景） |
+| `xi:include` | ✅ | 有 `xpointer`：选中容器 children；无 `xpointer`：整体包含目标根元素（CreateObjectDie / TechUpgradeReceiver 等片段场景） |
 | EA `<Include type="all">` | ✅ | BAB“内容合并”，等价于复制进来 |
 | `type="instance"` | ❌ | 只影响编译可见性；拼树会把 BaseVehicle 的顶层资产错误塞进当前文档 |
 | `type="reference"` | ❌ | manifest 编译产物，无文本内容 |

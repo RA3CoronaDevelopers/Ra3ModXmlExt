@@ -169,12 +169,26 @@ async function expandXi(
     if (!target?.parse?.root) return;
 
     const xpointer = xi.attrs.find((a) => a.name === "xpointer")?.value ?? "";
-    const selected = xpointer
-      ? findXPointerContainer(target.parse, xpointer)?.children ?? []
-      : target.parse.root.children;
-
-    for (const sel of selected) {
-      await handleChild(sel, logicalParent, resolved, depth + 1, ctx, elements, stack);
+    if (xpointer) {
+      const container = findXPointerContainer(target.parse, xpointer);
+      if (!container) return;
+      for (const sel of container.children) {
+        await handleChild(sel, logicalParent, resolved, depth + 1, ctx, elements, stack);
+      }
+    } else {
+      // XInclude semantics: without an xpointer the whole target document is
+      // included, i.e. its root element replaces the <xi:include> node.
+      // RA3 fragments such as GenericCelestialBuildingSuicide.xml rely on this
+      // to splice the module element itself (CreateObjectDie) into the parent.
+      await handleChild(
+        target.parse.root,
+        logicalParent,
+        resolved,
+        depth + 1,
+        ctx,
+        elements,
+        stack,
+      );
     }
   } finally {
     stack.delete(key);

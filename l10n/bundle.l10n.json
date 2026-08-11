@@ -66,6 +66,7 @@
   " (based on a partial index)": " (based on a partial index)",
   " (index incomplete — may be a false positive)": " (index incomplete — may be a false positive)",
   "Include target not found: {0}": "Include target not found: {0}",
+  "xi:include target not found: {0}": "xi:include target not found: {0}",
   "XInclude element (W3C XInclude namespace) — not part of the RA3 XSD model.": "XInclude element (W3C XInclude namespace) — not part of the RA3 XSD model.",
   "**Top-level asset element**": "**Top-level asset element**",
   "Attributes: {0} · Children: {1}": "Attributes: {0} · Children: {1}",

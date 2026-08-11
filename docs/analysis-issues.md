@@ -1906,3 +1906,55 @@ W3DContainer:AUMCV_HOVER
 
 `docs/plan.md` 的 manifest 建模小节补充：`assetsById` 必须保留同 id 的不同
 类型定义，去重身份为 `(type, file, line)`。
+
+---
+
+## 二十八、问题分析（2026-08-11）：xi:include 无 xpointer 语义与片段文件诊断（P0）
+
+### 现象
+
+`Data/Includes/GenericCelestialBuildingSuicide.xml` 这类被 `xi:include` 引用的
+片段文件在独立打开时被报一串错误：`DieMuxData` 报 `missing-id`（“顶层资产需要
+id”），wrapper 根不在 XSD 里的文件报 `unknown-element`，引用在完整索引下能解析
+前还会报未解析引用。
+
+### 根因
+
+1. **无 `xpointer` 的展开语义错误**：`expandDocument` 把目标 `root.children`
+   拼进父节点。按 XInclude 语义（也是 Corona 的实际用法），没有 `xpointer` 时应
+   整体包含目标文档的根元素。`GenericCelestialBuildingSuicide.xml` 的根
+   `CreateObjectDie` 本身就是要放进 GameObject 的模块；旧实现会丢掉它，只把
+   `DieMuxData` 拼进去。
+2. **诊断层把片段当完整文档**：`isTopLevel` 假定根一定是 `AssetDeclaration`，
+   于是片段根的子元素被当成顶层资产要求 id；未知 wrapper 根也被当成未知元素。
+3. **引用/define 与上下文耦合**：片段里的引用可能由 include 者（或 include 者
+   的 include 链）提供，独立打开片段时无法可靠判定。
+
+### 修复（P0，不猜测外部上下文）
+
+1. `logicalTree.expandDocument`：无 `xpointer` 时 `handleChild(parse.root)`，
+   整体包含目标根元素；有 `xpointer` 时保持 `/n:Name/child::*` 语义。
+2. `diagnostics` 片段模式：根 localName 不是 `AssetDeclaration` 即为片段。
+   - 一律跳过顶层 `missing-id` / 跨文件重复 id、未解析引用、未定义 `$DEFINE`；
+   - 根是已知 XSD 元素时（如 `CreateObjectDie`），根自身提供类型上下文，整棵子树
+     的未知元素 / 未知属性仍正常校验；
+   - 根不在 XSD 中（wrapper/container，如 `CommonArmorDraws`）时，只报 XML 语法
+     与片段内部 `xi:include` / `<Include>` 目标缺失，其余检查延后到上下文诊断。
+3. 新增 `checkXiInclude`：`xi:include` 目标缺失在 Problems 中上报
+   `include-not-found`（此前只在 indexer 内部诊断）。
+
+### 测试（202 → 202 全绿）
+
+- `localScope.test.mjs`：无 `xpointer` 的 `xi:include` 把目标根元素
+  `CreateObjectDie` 整体拼入 `Behaviors`，`DieMuxData` 仍挂在它下面；
+- `contentFeatures.test.mjs`：片段已知根不再报 `missing-id` / 未解析引用，但子树
+  未知属性仍报；未知 wrapper 根不报元素/属性，片段内部缺失 `xi:include` 仍报；
+  完整 `AssetDeclaration` 文档的顶层 id 检查不受影响。
+
+### 边界与后续
+
+- **P1 上下文诊断**：indexer 增加“反向 include 表”（`xi:include` 目标 →
+  include 者列表），打开片段时用 include 者的逻辑树做真实上下文校验，再恢复引用 /
+  define / 子元素结构检查。多上下文取并集去重。
+- `<Include type="all|instance|reference">` 与 `xi:include` 语义不同：前者的目标
+  是完整 `AssetDeclaration`，不进入片段模式；后者才允许片段文件。

@@ -452,3 +452,89 @@ test("diagnostics report unresolved typed content references only", async () => 
     "untyped WeakReference content is not diagnosed as a global ref",
   );
 });
+
+test("fragment diagnostics skip document-level checks but keep subtree validation", async () => {
+  const text =
+    `<CreateObjectDie xmlns="uri:ea.com:eala:asset" id="ModuleTag_X" CreationList="OCL_X">\n` +
+    `  <DieMuxData DeathTypo="SUICIDED"/>\n` +
+    `</CreateObjectDie>`;
+  const scope = await makeScope(text, makeIdx([]));
+  const collection = new FakeDiagnosticCollection();
+  const provider = new Ra3Diagnostics({
+    isRa3Workspace: () => true,
+    getScope: async () => scope,
+    settings: {
+      diagnoseUnknownElements: true,
+      reportUnresolvedReferences: "warning",
+    },
+  });
+  provider["collection"] = collection;
+  await provider.update(makeDocument(text));
+  const codes = collection.last.diags.map((d) => d.code);
+  assert.ok(
+    !codes.includes("missing-id"),
+    "fragment children are not treated as top-level assets",
+  );
+  assert.ok(
+    !codes.some((c) => c.startsWith("unresolved-reference")),
+    "fragment references are deferred to the includer context",
+  );
+  assert.ok(
+    codes.includes("unknown-attribute"),
+    "a known fragment root still validates its subtree attributes",
+  );
+});
+
+test("fragment diagnostics ignore unknown wrapper roots and still report missing xi:include", async () => {
+  const text =
+    `<CommonArmorDraws xmlns="uri:ea.com:eala:asset" xmlns:xi="http://www.w3.org/2001/XInclude">\n` +
+    `  <ScriptedModelDraw id="M" Bogus="x"/>\n` +
+    `  <xi:include href="MissingTarget.xml"/>\n` +
+    `</CommonArmorDraws>`;
+  const scope = await makeScope(text, makeIdx([]));
+  const collection = new FakeDiagnosticCollection();
+  const provider = new Ra3Diagnostics({
+    isRa3Workspace: () => true,
+    getScope: async () => scope,
+    settings: {
+      diagnoseUnknownElements: true,
+      reportUnresolvedReferences: "warning",
+    },
+  });
+  provider["collection"] = collection;
+  await provider.update(makeDocument(text));
+  const codes = collection.last.diags.map((d) => d.code);
+  assert.ok(
+    !codes.includes("unknown-element"),
+    "wrapper roots are not validated as standalone documents",
+  );
+  assert.ok(
+    !codes.includes("unknown-attribute"),
+    "unknown wrapper roots do not trigger subtree attribute guessing",
+  );
+  assert.ok(
+    codes.includes("include-not-found"),
+    "missing xi:include targets inside fragments are still reported",
+  );
+});
+
+test("full documents still require ids on top-level assets", async () => {
+  const text = `<AssetDeclaration>\n  <GameObject/>\n</AssetDeclaration>`;
+  const scope = await makeScope(text, makeIdx([]));
+  const collection = new FakeDiagnosticCollection();
+  const provider = new Ra3Diagnostics({
+    isRa3Workspace: () => true,
+    getScope: async () => scope,
+    settings: {
+      diagnoseUnknownElements: true,
+      reportUnresolvedReferences: "warning",
+    },
+  });
+  provider["collection"] = collection;
+  await provider.update(makeDocument(text));
+  const codes = collection.last.diags.map((d) => d.code);
+  assert.ok(
+    codes.includes("missing-id"),
+    "AssetDeclaration documents keep top-level id checks",
+  );
+});

@@ -66,6 +66,7 @@
   " (based on a partial index)": "（基于部分索引）",
   " (index incomplete — may be a false positive)": "（索引不完整——可能是误报）",
   "Include target not found: {0}": "找不到 Include 目标：{0}",
+  "xi:include target not found: {0}": "找不到 xi:include 目标：{0}",
   "XInclude element (W3C XInclude namespace) — not part of the RA3 XSD model.": "XInclude 元素（W3C XInclude 命名空间）——不属于 RA3 XSD 模型。",
   "**Top-level asset element**": "**顶层资产元素**",
   "Attributes: {0} · Children: {1}": "属性：{0} · 子元素：{1}",

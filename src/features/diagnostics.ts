@@ -139,6 +139,17 @@ export class Ra3Diagnostics {
   ): void {
     const settings = this.ws.settings;
     const fileDuplicates = new Map<string, { line: number }>();
+    // A file whose root is not AssetDeclaration is an xi:include fragment
+    // (e.g. Data/Includes/GenericCelestialBuildingSuicide.xml). It is not a
+    // standalone RA3 document: top-level id / duplicate checks do not apply,
+    // and references/defines can only be resolved in the includer's context.
+    // When the fragment root itself is a known XSD element (e.g.
+    // CreateObjectDie), the root supplies the type context for its whole
+    // subtree, so element/attribute validation is still reliable.
+    const rootName = root ? localName(root.name) : "";
+    const isFragment = rootName !== "AssetDeclaration";
+    const validateTree =
+      !isFragment || (root !== null && model.elementTypeName(rootName) !== null);
 
     for (const el of doc.elements) {
       // Only report diagnostics for nodes that belong to the document being
@@ -155,7 +166,7 @@ export class Ra3Diagnostics {
       const range = tagRange(document, el);
 
       // Top-level assets must have an id.
-      if (isTopLevel) {
+      if (!isFragment && isTopLevel) {
         const idAttr = el.attrs.find((a) => a.name === "id");
         if (!idAttr || !idAttr.value) {
           diags.push(
@@ -206,7 +217,7 @@ export class Ra3Diagnostics {
       const isXsdElement = model.isXsdElementName(el.name);
 
       // Unknown element.
-      if (settings.diagnoseUnknownElements && isXsdElement) {
+      if (settings.diagnoseUnknownElements && isXsdElement && validateTree) {
         const knownType = model.elementTypeName(local);
         if (!knownType) {
           diags.push(
@@ -221,7 +232,7 @@ export class Ra3Diagnostics {
       }
 
       // Attributes.
-      if (isXsdElement) {
+      if (isXsdElement && validateTree) {
         const elType = resolveElementType(el);
         const knownAttrs = model.attributesOfType(elType);
         const knownNames = new Set(knownAttrs.map((a) => a.name));
@@ -247,25 +258,68 @@ export class Ra3Diagnostics {
           }
 
           if (!attr.hasValue) continue;
-          this.checkValueReferences(
-            elType,
-            attr.name,
-            attr.value,
-            attr,
-            document,
-            idx,
-            diags,
-            provisional,
-          );
+          // References and $DEFINE constants inside fragments depend on the
+          // includer's context; don't report them until P1 resolves the real
+          // include sites.
+          if (!isFragment) {
+            this.checkValueReferences(
+              elType,
+              attr.name,
+              attr.value,
+              attr,
+              document,
+              idx,
+              diags,
+              provisional,
+            );
+          }
         }
-        this.checkContentReferences(el, elType, document, idx, diags, provisional);
+        if (!isFragment) {
+          this.checkContentReferences(el, elType, document, idx, diags, provisional);
+        }
       }
 
       // Include-specific checks.
       if (local === "Include") {
         this.checkInclude(el, document, idx, diags);
+      } else if (local === "include" && el.name.toLowerCase().startsWith("xi:")) {
+        this.checkXiInclude(el, document, idx, diags);
       }
     }
+  }
+
+  private checkXiInclude(
+    el: XmlElement,
+    document: vscode.TextDocument,
+    idx: ModIndex | null,
+    diags: vscode.Diagnostic[],
+  ): void {
+    const hrefAttr = el.attrs.find((a) => a.name === "href");
+    if (!hrefAttr?.hasValue) return;
+    const searchPaths = idx
+      ? buildSearchPaths(idx.sdkDir, idx.projectDir)
+      : this.ws.searchPaths(document);
+    if (!searchPaths) return;
+    const resolved = resolveSource(
+      hrefAttr.value,
+      dirname(document.uri.fsPath),
+      searchPaths,
+    );
+    if (resolved.path) return;
+    if (/^(DATA|ART|AUDIO):/i.test(hrefAttr.value.trim())) {
+      if (this.sdkUnusable()) return;
+    }
+    diags.push(
+      this.diag(
+        new vscode.Range(
+          document.positionAt(hrefAttr.valueStart),
+          document.positionAt(hrefAttr.valueEnd),
+        ),
+        t("xi:include target not found: {0}", hrefAttr.value),
+        vscode.DiagnosticSeverity.Warning,
+        "include-not-found",
+      ),
+    );
   }
 
   private checkCrossFileDuplicate(
