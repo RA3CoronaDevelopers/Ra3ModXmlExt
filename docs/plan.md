@@ -1,6 +1,6 @@
 # 调研结论与实施计划（已按最新代码同步更新）
 
-> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-10）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）、simple-content 元素文本引用（补全 / hover / 跳转 / 诊断 / Find All References）、语义引用索引 / CodeLens 引用计数 / 未引用资产命令、属性补全换行判定与按 id 去重、manifest 源地址按 vanilla-only 解析（避免 mod 同名 DATA 路径遮蔽）等。
+> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-11）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）、simple-content 元素文本引用（补全 / hover / 跳转 / 诊断 / Find All References）、语义引用索引 / CodeLens 引用计数 / 未引用资产命令、属性补全换行判定与按 id 去重、manifest 源地址按 vanilla-only 解析（避免 mod 同名 DATA 路径遮蔽）、`assetsById` 保留同 id 的不同类型 manifest 定义等。
 
 ## 一、调研结论（带证据）
 
@@ -140,7 +140,7 @@ test/
    `W3DHierarchy` / `W3DCollisionBox` 等），使 `Model@Name`、`Hierarchy`、`Mesh`
    等引用可解析；大模型文件**浅扫描**（不建 DOM），结果缓存在 workspace 级、
    跨重建复用（详见设计决策 14）。
-3. **manifest 资产建模**：类型优先用哈希表，未知时从名称前缀推导；可引用 ID 取最后冒号段；类型名统一走大小写规范化（`W3dContainer` ↔ `W3DContainer`），类型匹配严格遵循 XSD 继承链。
+3. **manifest 资产建模**：类型优先用哈希表，未知时从名称前缀推导；可引用 ID 取最后冒号段；类型名统一走大小写规范化（`W3dContainer` ↔ `W3DContainer`），类型匹配严格遵循 XSD 继承链。`assetsById` 按 id 汇总**全部类型**的定义，去重身份为 `(type, file, line)`，同一 manifest 中同名但不同类型的美术资产（如 `W3DHierarchy:AUMCV_HOVER` 与 `W3DContainer:AUMCV_HOVER`）必须全部保留，避免 `Model@Name` 这类 `BaseRenderAssetType` 引用因先到的非渲染类型而被误判为未解析。
 4. **上下文感知元素类型**：同名元素按父元素类型解析（`resolveElementType` 沿解析树逐层 `childTypeOf`，失败回退全局映射），保证 `<Weapon>` 等元素的属性/引用判定正确。
 5. **引用判定与解析**：`refType` 或 `isRef` 均视为引用；带 `refType` 时严格按类型过滤（同名 ID 不串类型）；`inheritFrom` 按可继承类型过滤。**局部作用域例外**（`isLocalReferenceAttribute`）：`id` 是元素自身的定义点——无 refType 或 refType 与自身类型兼容时不检查、不解析（`RoadObject@id→Road` 这类跨类型 id 引用保留检查）；Poid 类型属性是管线局部引用，全局索引无法判定，不检查、不解析。
 6. **重复 ID 诊断**：与 `check_duplicate_ids.py` 一致——SageXml 不参与冲突判定，mod 覆盖原版视为正常。

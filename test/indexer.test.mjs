@@ -12,6 +12,7 @@ import {
   IndexRecordsCache,
 } from "../out/indexer/caches.js";
 import { resolveReferenceTargetsForType } from "../out/indexer/refs.js";
+import { assetDefKey } from "../out/indexer/referenceIndex.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const project = join(root, "test", "fixtures", "minimod");
@@ -27,6 +28,75 @@ async function buildIndex() {
     walker: new CachedDirectoryWalker(),
   });
   return indexer.build();
+}
+
+function u32(value) {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(value >>> 0);
+  return b;
+}
+
+function u16(value) {
+  const b = Buffer.alloc(2);
+  b.writeUInt16LE(value >>> 0);
+  return b;
+}
+
+/** Minimal version-5 manifest with one asset entry per supplied descriptor. */
+function minimalManifestV5(assets) {
+  const nameParts = [];
+  const sourceParts = [];
+  let nameOffset = 0;
+  let sourceOffset = 0;
+  const entries = assets.map((asset) => {
+    const name = Buffer.from(`${asset.name}\0`, "ascii");
+    const source = Buffer.from(`${asset.source ?? ""}\0`, "ascii");
+    const entry = {
+      typeId: asset.typeId,
+      nameOffset,
+      sourceFileNameOffset: sourceOffset,
+    };
+    nameParts.push(name);
+    sourceParts.push(source);
+    nameOffset += name.length;
+    sourceOffset += source.length;
+    return entry;
+  });
+  const names = Buffer.concat(nameParts);
+  const sources = Buffer.concat(sourceParts);
+
+  const parts = [
+    Buffer.from([0, 1]), // isBigEndian=false, isLinked=true
+    u16(5), // version
+    u32(0), // streamChecksum
+    u32(0), // allTypesHash
+    u32(assets.length), // assetCount
+    u32(0), // totalInstanceDataSize
+    u32(0), // maxInstanceChunkSize
+    u32(0), // maxRelocationChunkSize
+    u32(0), // maxImportsChunkSize
+    u32(0), // assetReferenceBufferSize
+    u32(0), // referencedManifestNameBufferSize
+    u32(names.length), // assetNameBufferSize
+    u32(sources.length), // sourceFileNameBufferSize
+  ];
+  for (const entry of entries) {
+    parts.push(
+      u32(entry.typeId),
+      u32(0), // instanceId
+      u32(0), // typeHash
+      u32(0), // instanceHash
+      u32(0), // assetReferenceOffset
+      u32(0), // assetReferenceCount
+      u32(entry.nameOffset),
+      u32(entry.sourceFileNameOffset),
+      u32(0), // instanceDataSize
+      u32(0), // relocationDataSize
+      u32(0), // importsDataSize
+    );
+  }
+  parts.push(names, sources);
+  return Buffer.concat(parts);
 }
 
 test("indexes assets, defines, streams and include errors", async () => {
@@ -131,6 +201,102 @@ test("w3x files appear in Include source completion candidates", async () => {
     idx.sourceCandidates.some((c) => c.source === "DATA:Includes/Models/Tank_SKN.w3x"),
     "DATA: w3x candidate",
   );
+});
+
+test("manifest assets sharing an id keep every type in assetsById", async () => {
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), "ra3-manifest-multitype-"));
+  const projectDir = join(tmp, "project");
+  const sdkDir = join(tmp, "sdk");
+  const builtmodsDir = join(sdkDir, "builtmods");
+  fs.mkdirSync(join(projectDir, "Data"), { recursive: true });
+  fs.mkdirSync(builtmodsDir, { recursive: true });
+  fs.writeFileSync(join(sdkDir, "Static.xml"), "<AssetDeclaration/>");
+  fs.writeFileSync(
+    join(projectDir, "Data", "Mod.xml"),
+    `<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+  <Includes>
+    <Include type="reference" source="DATA:static.xml" />
+  </Includes>
+  <GameObject id="AlliedMCV">
+    <Draws>
+      <ScriptedModelDraw id="ModuleTag_Draw_Hover">
+        <ModelConditionState ParseCondStateType="PARSE_DEFAULT">
+          <Model Name="AUMCV_Hover" />
+        </ModelConditionState>
+      </ScriptedModelDraw>
+    </Draws>
+  </GameObject>
+</AssetDeclaration>`,
+  );
+  fs.writeFileSync(
+    join(builtmodsDir, "static.manifest"),
+    minimalManifestV5([
+      {
+        typeId: 0x11111111,
+        name: "W3DHierarchy:AUMCV_HOVER",
+        source: "ART:aumcv_hover.w3x",
+      },
+      {
+        typeId: 0x22222222,
+        name: "W3DAnimation:AUMCV_HOVER",
+        source: "ART:aumcv_hover.w3x",
+      },
+      {
+        typeId: 0x33333333,
+        name: "W3DContainer:AUMCV_HOVER",
+        source: "ART:aumcv_hover.w3x",
+      },
+      {
+        typeId: 0x44444444,
+        name: "Texture:ABAirfield",
+        source: "ART:abairfield.tga",
+      },
+      {
+        typeId: 0x55555555,
+        name: "W3DContainer:ABAIRFIELD",
+        source: "ART:abairfield.w3x",
+      },
+    ]),
+  );
+
+  const indexer = new ModIndexer({
+    projectDir,
+    sdkDir,
+    builtmodsDirs: [builtmodsDir],
+    indexSageXml: false,
+    additionalDataSearchPaths: [],
+    walker: new CachedDirectoryWalker(),
+  });
+  const idx = await indexer.build();
+
+  // The reported AUMCV_HOVER shape: Hierarchy/Animation precede the
+  // W3DContainer, so the by-id index must not drop the render asset.
+  const hover = idx.assetsById.get("aumcv_hover");
+  assert.ok(hover?.some((d) => d.type === "W3DContainer"), "W3DContainer retained");
+  assert.ok(hover?.some((d) => d.type === "W3DHierarchy"), "W3DHierarchy retained");
+  assert.ok(hover?.some((d) => d.type === "W3DAnimation"), "W3DAnimation retained");
+
+  const targets = resolveReferenceTargetsForType(
+    idx,
+    "ScriptedModelDrawModel",
+    "Name",
+    "AUMCV_Hover",
+  );
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].def.type, "W3DContainer");
+
+  const container = hover.find((d) => d.type === "W3DContainer");
+  const sites = idx.references.get(assetDefKey(container));
+  assert.ok(
+    sites?.some((s) => s.kind === "attr" && /Mod\.xml$/.test(s.file)),
+    "Model reference is attributed to the W3DContainer definition",
+  );
+
+  // Common Texture-first shape must also keep the render definition.
+  const airfield = idx.assetsById.get("abairfield");
+  assert.ok(airfield?.some((d) => d.type === "Texture"), "Texture retained");
+  assert.ok(airfield?.some((d) => d.type === "W3DContainer"), "W3DContainer retained");
 });
 
 test("build publishes an immutable XML phase before art scanning", async () => {

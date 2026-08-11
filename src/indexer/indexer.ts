@@ -1014,14 +1014,32 @@ export class ModIndexer {
     }
     const arr = byId.get(idKey);
     if (arr) {
-      if (arr.some((a) => a.file === def.file && a.line === def.line)) return;
+      if (
+        arr.some(
+          (a) =>
+            a.type === def.type &&
+            a.file === def.file &&
+            a.line === def.line,
+        )
+      ) {
+        return;
+      }
       arr.push(def);
     } else {
       byId.set(idKey, [def]);
     }
     const all = this.assetsById.get(idKey);
     if (all) {
-      if (all.some((a) => a.file === def.file && a.line === def.line)) return;
+      if (
+        all.some(
+          (a) =>
+            a.type === def.type &&
+            a.file === def.file &&
+            a.line === def.line,
+        )
+      ) {
+        return;
+      }
       all.push(def);
     } else {
       this.assetsById.set(idKey, [def]);

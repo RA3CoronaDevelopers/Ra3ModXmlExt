@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.22 — 2026-08-11
+
+### Fixed
+
+- Manifest assets that share the same id under different types are now all kept in the by-id index. Previously the first same-id entry (e.g. `W3DHierarchy:AUMCV_HOVER`) could shadow later definitions (e.g. `W3DContainer:AUMCV_HOVER`), causing `Model@Name` and other `BaseRenderAssetType` references to be reported as unresolved even though the asset existed in `Static.manifest`.
+
 ## 0.1.21 — 2026-08-11
 
 ### Added

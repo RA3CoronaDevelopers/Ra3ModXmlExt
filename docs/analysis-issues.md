@@ -1813,3 +1813,96 @@ manifest 候选就会被劫持到 mod 文件。
 
 > 备注：ART/AUDIO 源映射按用户意见不作为本轮目标；`buildVanillaSearchPaths`
 > 已包含对应 SDK 目录，将来若有源码可直接复用。
+
+---
+
+## 二十九、问题分析（2026-08-11）：manifest 同名不同类型资产被 `assetsById` 去重丢弃
+
+### 现象
+
+Corona `Data\Allied\Units\AlliedMCV.xml` 的
+`ScriptedModelDraw → ModelConditionState → Model Name="AUMCV_Hover"`
+报 unresolved-reference：
+
+```xml
+<ScriptedModelDraw id="ModuleTag_Draw_Hover" OkToChangeModelColor="true">
+  <ModelConditionState ParseCondStateType="PARSE_DEFAULT">
+    <Model Name="AUMCV_Hover" />
+  </ModelConditionState>
+</ScriptedModelDraw>
+```
+
+提示为“没有类型为 `BaseRenderAssetType` 的定义（其他类型存在同名 id）”，
+但 `Static.manifest` 中确实存在 `W3DContainer:AUMCV_HOVER`。
+
+### 根因
+
+`src/indexer/indexer.ts` 的 `addAsset()` 在维护两个索引时用了同一套去重：
+
+- `assets`：`类型 -> id -> 定义`，按 `(file, line)` 去重；
+- `assetsById`：`id -> 所有类型定义`，也按 `(file, line)` 去重。
+
+XML 定义的行号各不相同，所以 `(file, line)` 足够；但 manifest 资产入库时
+`line` 固定为 0，于是同一个 manifest 里 id 相同、类型不同的多个资产会被
+当成同一条定义，只保留最先出现的类型。
+
+`Static.manifest` 中 `AUMCV_HOVER` 的实际顺序是：
+
+```text
+W3DHierarchy:AUMCV_HOVER
+W3DAnimation:AUMCV_HOVER
+W3DContainer:AUMCV_HOVER
+```
+
+`W3DContainer` 因此被 `W3DHierarchy` 挤掉。`Model@Name` 的 `refType` 是
+`BaseRenderAssetType`，`W3DHierarchy` 按 XSD 继承链不是渲染资产，所以
+`assetsById` 里“有同名 id”但“没有匹配类型”，正好产生上述提示。
+
+### 为什么以前没暴露 / 不是回归
+
+第三轮修复的 `AUAntiVehicleVehicleTech1_SKN` 在 static.manifest 里只有一个
+同名定义（`W3DContainer`），没有类型竞争，因此当时测不到该分支。git blame
+显示 `addAsset` 的 `(file, line)` 去重从首个提交就存在，所以这是潜在缺陷被
+新数据形态首次触发，不是近期改动造成的回归。
+
+### 影响面（真实 manifest 扫描）
+
+对 `Static / Global / Audio` 三个 manifest 模拟当前入库逻辑：
+
+| 指标 | 数值 |
+|---|---:|
+| 同名 id 跨类型的 ID | 1318 |
+| 被丢弃的类型定义 | 1470 |
+| `W3DContainer` / `W3DMesh` 被丢弃的 id | 412 |
+
+`Audio.manifest` 无此类碰撞。受影响的不止诊断和 hover：
+`resolveReferenceTargetsForType`、语义 FAR / CodeLens 引用计数、未类型化补全
+都经 `assetsById` 查找，因此 manifest 中的模型引用普遍可能误报或漏计。
+
+### 修复
+
+`assetsById` 是“按 id 汇总所有类型定义”的索引，去重身份必须包含类型：
+
+1. `src/indexer/indexer.ts` 的 `addAsset()`：`assets` 与 `assetsById` 的去重
+   都改为 `(type, file, line)`；
+2. `src/indexer/localScope.ts` 的 `addAsset()`：同样的去重修正，避免局部
+   overlay 未来遇到同构数据时重复踩坑。
+
+`mergeLocalAndGlobalDefs`、`assetDefKey` 本来已按 `(type, id, file, line)`
+区分定义，修复后三处语义一致。
+
+### 测试（新增 1 个集成测试，全量 198 个通过）
+
+`test/indexer.test.mjs` 新增自包含用例：
+
+- 用最小 version-5 manifest 构造 `W3DHierarchy / W3DAnimation / W3DContainer`
+  三个同 id 资产，顺序刻意让渲染类型排在最后；
+- 再构造 `Texture:ABAirfield` 在前、`W3DContainer:ABAIRFIELD` 在后的常见形态；
+- 断言 `assetsById` 保留全部类型；
+- 断言 `Model@Name` 经 `resolveReferenceTargetsForType` 命中 `W3DContainer`；
+- 断言反向引用索引把该引用记到 `W3DContainer` 名下。
+
+### 文档同步
+
+`docs/plan.md` 的 manifest 建模小节补充：`assetsById` 必须保留同 id 的不同
+类型定义，去重身份为 `(type, file, line)`。
