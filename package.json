@@ -3,8 +3,13 @@
   "displayName": "%ra3modxml.displayName%",
   "description": "%ra3modxml.description%",
   "version": "0.1.21",
-  "publisher": "ra3-mod-xml",
+  "publisher": "lanyi",
   "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://git.ra3battle.cn/RA3CoronaDevelopers/Ra3ModXmlExt.git"
+  },
+  "homepage": "https://git.ra3battle.cn/RA3CoronaDevelopers/Ra3ModXmlExt",
   "l10n": "./l10n",
   "engines": {
     "vscode": "^1.85.0"
@@ -135,7 +140,8 @@
     "generate-model": "node tools/xsd-to-model.mjs",
     "pretest": "tsc",
     "test": "node --test \"test/*.test.mjs\"",
-    "package": "npm run build && vsce package --no-rewrite-relative-links"
+    "package": "npm run build && vsce package --no-rewrite-relative-links",
+    "publish": "npm run build && vsce publish --no-rewrite-relative-links"
   },
   "dependencies": {
     "fast-xml-parser": "^4.5.0"
