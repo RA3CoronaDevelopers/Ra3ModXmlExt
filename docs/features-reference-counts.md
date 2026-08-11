@@ -86,9 +86,10 @@ ModIndex.references             Map<定义 key, ReferenceSite[]>
 - 点击执行 `ra3modxml.showReferences` → `editor.action.showReferences`
   打开 references peek，结果与计数完全一致（不含定义本身）；
 - 计数除了当前定义自己的反向索引桶，还并入“manifestSource 可解析到当前
-  文件”的 manifest 定义桶：manifest 资产有对应 SageXml 源码时，引用直接
-  视作 SageXml 源码对该 asset 的引用（Go to Definition 同样把 manifest
-  定义映射到 SageXml 源码）；
+  文件”的 manifest 定义桶：`manifestSource` 按 vanilla-only 搜索路径
+  （SDK 根 + `SageXml`）解析，mod 同名 DATA 路径不会被视为源码；manifest
+  资产有对应 SageXml 源码时，引用直接视作 SageXml 源码对该 asset 的引用
+  （Go to Definition 同样把 manifest 定义映射到 SageXml 源码）；
 - 索引重建完成后自动 `editor.action.codeLens.refresh`，计数不会停留在旧值。
 
 ## 五、未引用资产

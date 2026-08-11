@@ -137,3 +137,56 @@ test("diskCacheKey differs when the identity changes", () => {
   assert.notEqual(a, b);
   assert.equal(a, diskCacheKey(identity));
 });
+
+test("load returns records without stat validation", async (t) => {
+  const tmp = makeTmp(t);
+  const file = join(tmp, "a.xml");
+  fs.writeFileSync(file, "0123456789");
+  const filePath = join(tmp, "index-records.json.gz");
+  const cache = new DiskRecordsCache(filePath, identity);
+  await cache.save([
+    [
+      file.toLowerCase(),
+      { stat: stampOf(file), records: sampleRecords, kind: "full" },
+    ],
+  ]);
+
+  const { records, stats } = await cache.load();
+  assert.equal(records.length, 1);
+  assert.equal(stats.fileExists, true);
+  assert.equal(stats.keyMatched, true);
+  assert.equal(stats.loaded, 1);
+  assert.equal(stats.validated, 0);
+  assert.equal(stats.dropped, 0);
+  assert.ok(stats.loadMs >= 0);
+});
+
+test("validate reports changed/missing entries and keeps valid ones", async (t) => {
+  const tmp = makeTmp(t);
+  const a = join(tmp, "a.xml");
+  const b = join(tmp, "b.xml");
+  fs.writeFileSync(a, "0123456789");
+  fs.writeFileSync(b, "0123456789");
+  const filePath = join(tmp, "index-records.json.gz");
+  const cache = new DiskRecordsCache(filePath, identity);
+  await cache.save([
+    [a.toLowerCase(), { stat: stampOf(a), records: sampleRecords, kind: "full" }],
+    [b.toLowerCase(), { stat: stampOf(b), records: sampleRecords, kind: "full" }],
+  ]);
+
+  const { records } = await cache.load();
+  const past = new Date(Date.now() - 60000);
+  fs.utimesSync(b, past, past);
+  const progress = [];
+  const { stats, kept, invalidKeys } = await cache.validate(records, (done, total) => {
+    progress.push([done, total]);
+  });
+  assert.equal(stats.validated, 1);
+  assert.equal(stats.dropped, 1);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].key, a.toLowerCase());
+  assert.deepEqual(invalidKeys, [b.toLowerCase()]);
+  assert.ok(stats.validateMs >= 0);
+  assert.deepEqual(progress[progress.length - 1], [1, 2]);
+  assert.ok(progress.every(([done], i) => i === 0 || done >= progress[i - 1][0]));
+});

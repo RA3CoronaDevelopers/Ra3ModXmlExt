@@ -122,15 +122,25 @@ function makeScope() {
 function makeWs(scope) {
   const parse = parseXml(TEXT);
   const lineMap = new LineMap(TEXT);
+  const indexer = {
+    readDom: async (path) =>
+      path === FILE
+        ? { file: { path: FILE }, parse, lineMap, records: null }
+        : null,
+  };
   return {
     isRa3Workspace: () => true,
     getScope: async () => scope,
-    indexer: {
-      readDom: async (path) =>
-        path === FILE
-          ? { file: { path: FILE }, parse, lineMap, records: null }
-          : null,
-    },
+    indexer,
+    indexerForFile: () => indexer,
+    activeIndexer: () => indexer,
+    recordsSyncSurfaceFor: () => ({
+      get index() {
+        return scope.merged;
+      },
+      invalidate: () => {},
+      scheduleRebuild: () => {},
+    }),
   };
 }
 

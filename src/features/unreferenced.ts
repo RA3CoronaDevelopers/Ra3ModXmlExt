@@ -23,13 +23,13 @@ export async function findUnreferencedAssets(
   ws: ModWorkspace,
   args?: { type?: string },
 ): Promise<void> {
-  if (!ws.isRa3Workspace() || !ws.index) {
+  const idx = ws.activeIndex();
+  if (!ws.isRa3Workspace() || !idx) {
     void vscode.window.showInformationMessage(
       "RA3 Mod XML: no index available yet.",
     );
     return;
   }
-  const idx = ws.index;
   const byType = unreferencedByType(idx);
 
   let type = args?.type;

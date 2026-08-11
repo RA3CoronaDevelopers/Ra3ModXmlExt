@@ -2,6 +2,8 @@
  * Parser for SAGE `.manifest` files, ported from OpenSAGE
  * (src/OpenSage.Game/Data/StreamFS/ManifestFile.cs, commit d45d361).
  *
+ * Licensed under LGPL-3.0 (derived from OpenSAGE); see LICENSE.
+ *
  * The manifest is a binary index produced by BinaryAssetBuilder: every asset
  * compiled into a stream is listed with hashed type/instance ids, an offset
  * into the asset-name string buffer, and an optional source file name.

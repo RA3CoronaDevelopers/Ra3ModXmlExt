@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { join } from "node:path";
+import { normalizeSdkPath } from "./sdk";
 
 export interface ExtensionSettings {
   sdkPath: string;
@@ -13,7 +14,7 @@ export interface ExtensionSettings {
 
 export function readSettings(): ExtensionSettings {
   const cfg = vscode.workspace.getConfiguration("ra3modxml");
-  const sdkPath = cfg.get<string>("sdkPath", "C:\\Apps\\RA3-MODSDK-X");
+  const sdkPath = normalizeSdkPath(cfg.get<string>("sdkPath", ""));
   return {
     sdkPath,
     indexSageXml: cfg.get<boolean>("indexSageXml", true),
@@ -27,6 +28,8 @@ export function readSettings(): ExtensionSettings {
       "all",
     ) as ExtensionSettings["definitionMode"],
     additionalDataSearchPaths: cfg.get<string[]>("additionalDataSearchPaths", []),
-    builtmodsDirs: [join(sdkPath, "builtmods"), join(sdkPath, "builtmods-quantum")],
+    builtmodsDirs: sdkPath
+      ? [join(sdkPath, "builtmods"), join(sdkPath, "builtmods-quantum")]
+      : [],
   };
 }

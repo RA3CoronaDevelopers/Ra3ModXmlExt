@@ -1,6 +1,6 @@
 # 调研结论与实施计划（已按最新代码同步更新）
 
-> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-05）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）、simple-content 元素文本引用（补全 / hover / 跳转 / 诊断 / Find All References）、语义引用索引 / CodeLens 引用计数 / 未引用资产命令等。
+> 说明：本文档随实现演进持续同步。最近一次同步（2026-08-10）对齐了实现过程中新增的模块与设计变更：BAB 精确搜索路径、manifest 类型/ID 推导、上下文感知元素类型、属性级 refType / Poid 局部引用（`id` 定义点）、精确跳转范围、嵌套 `xi:include`、注入式语法高亮、bit-flag 列表补全（空格触发 / 排除已用 / 追加模式）、simple-content 元素文本引用（补全 / hover / 跳转 / 诊断 / Find All References）、语义引用索引 / CodeLens 引用计数 / 未引用资产命令、属性补全换行判定与按 id 去重、manifest 源地址按 vanilla-only 解析（避免 mod 同名 DATA 路径遮蔽）等。
 
 ## 一、调研结论（带证据）
 
@@ -69,7 +69,10 @@
 ```
 src/
   extension.ts         激活入口（provider 注册、索引调度、诊断调度）
-  workspace.ts         项目检测（Data/Mod.xml / mod.babproj）、索引生命周期、状态栏、重建防抖
+  projectRoot.ts       项目根发现（向上 / 容器向下 / 单文件，Data/Mod.xml、
+                       mapmetadata_*.xml、*.babproj 标记，纯 TS 可单测）
+  workspace.ts         多项目状态（按文档就近选项目、惰性索引、全局串行构建队列、
+                       共享缓存、按项目磁盘缓存、watchers、状态栏、重建防抖）
   settings.ts          配置读取（sdkPath、indexSageXml、definitionMode 等）
   language/
     xmlParser.ts       带源码偏移的轻量 XML 解析器（格式错误定位、容错）
@@ -81,7 +84,8 @@ src/
     schema-model.json  由 tools/xsd-to-model.mjs 生成
     asset-types.json   由 tools/extract-asset-types.mjs 生成（TypeId 哈希→类型名）
   indexer/
-    includeResolver.ts Include 路径解析（纯 TS，BAB /data /art /audio 顺序）
+    includeResolver.ts Include 路径解析（纯 TS，BAB /data /art /audio 顺序）+
+                       manifest 源 vanilla-only 解析（SDK 根 + SageXml）
     existence.ts       文件集存在性快照（目录枚举 Set，替代逐路径 statSync）
     manifestParser.ts  .manifest 二进制解析 + 类型/ID 推导（纯 TS）
     fileScanner.ts     目录遍历缓存 + Include source 候选收集
@@ -112,15 +116,24 @@ tools/
   extract-asset-types.mjs OpenSAGE AssetType.cs → asset-types.json
 test/
   fixtures/minimod      样例 Mod（include 各种情形、同名 ID、嵌套 xi:include、manifest 回退）
-  *.test.mjs            14 个测试文件（xmlParser / context / completion / semanticTokens /
+  *.test.mjs            16 个测试文件（xmlParser / context / completion / semanticTokens /
                         includeResolver / manifestParser / indexer / schemaModel / refs /
                         typeContext / manifestTypes / referenceIndex / codeLens /
-                        referenceProvider）
+                        referenceProvider / projectRoot / workspaceMulti）
 ```
 
 ### 关键设计决策
 
-1. **语言激活范围**：不劫持 `*.xml`。通过 `workspaceContains:**/Data/Mod.xml`、`**/*.babproj` 激活；语法高亮为**纯注入** grammar（不声明 `language`，避免覆盖内置 XML 语法）。
+1. **语言激活范围与项目检测**：不劫持 `*.xml`。激活条件含 `onLanguage:xml`、
+   `workspaceContains:Mod.xml`、`additionalmaps/mapmetadata_*.xml`、
+   `**/Data/Mod.xml`、`**/Data/additionalmaps/mapmetadata_*.xml`、`**/*.babproj`；
+   语法高亮为**纯注入** grammar（不声明 `language`，避免覆盖内置 XML 语法）。
+   项目根通过 `src/projectRoot.ts` 发现：工作区文件夹向上最多 12 层、容器文件夹
+   向下浅扫最多 3 层（跳过 Data/Art/builtmods/.git 等）、打开的 XML 文件向上，
+   任一 `Data/Mod.xml`、`Data/additionalmaps/mapmetadata_*.xml`、`*.babproj`
+   标记命中即算项目根（大小写不敏感、最近命中者优先）。多项目按文档就近选择：
+   单个项目打开时立即建索引；容器/多项目时惰性建索引（活动文档所属项目先建，
+   其他在文档打开/首次请求时建），构建经全局串行队列避免并发写共享缓存。
 2. **索引范围与默认值**：索引“项目 Data + additionalmaps + 沿 include 可达的 SageXml 原版源码”；SDK 路径默认 `C:\Apps\RA3-MODSDK-X`（可配置）。`reference` include 解析为 `builtmods` 下对应 manifest（惰性解析、按文件缓存），manifest 缺失/无效时回退到占位 XML。
    **美术资产（.w3x）**：`<Include type="all">` / `ART:` 指向的 `.w3x`（及内容嗅探为
    XML 的未知扩展名文件）按其顶层资产入库（`W3DContainer` / `W3DMesh` /
@@ -352,6 +365,62 @@ test/
     对 stat 匹配的 full XML 做内容哈希校验；打开文档时比较 records 哈希，
     不一致则定向 invalidate + `records-desync` 重建自愈；磁盘缓存 v2 → v3；
     测试 147 → 151；分析见 `docs/analysis-issues.md` 二十四。
+24. [x] 多项目支持（2026-08-07）：新增纯模块 `src/projectRoot.ts`（向上 12 层 /
+    容器向下 3 层 / 单文件向上，`Data/Mod.xml`、`mapmetadata_*.xml`、`*.babproj`
+    标记，大小写不敏感、最近优先、跳过 Data/Art/builtmods/.git 等目录）；
+    `ModWorkspace` 改为多项目状态——按文档就近选项目、单项目立即索引 /
+    多项目惰性索引（活动文档所属项目先建）、全局串行构建队列保护共享缓存、
+    磁盘缓存按项目分文件、watcher 事件按路径归属调度、workspace 文件夹变化
+    重检、激活事件补 mapmetadata 与打开 Data 文件夹场景；测试 151 → 168。
+25. [x] 属性补全换行判定与值补全去重（2026-08-07）：`attributeInsertLayout`
+     只按光标之前的完整属性判断“是否已在新行”，one-per-line 标签中间插入或
+     首属性新行补全不再多插换行，同一行第二个属性仍按原规则换行；
+     `assetIdItems` 按 id 去重（局部 overlay / 全局索引 / manifest 同一 ID
+     只给一项，其余定义列入文档说明），`defineItems` 同步按名去重；
+     测试 168 → 173；版本 0.1.20；分析见 `docs/analysis-issues.md` 二十五。
+26. [x] 磁盘缓存可观测性、分阶段校验与进度显示（2026-08-08）：
+     `DiskRecordsCache` 拆为 `load()`（读 + gunzip + JSON）与 `validate()`（逐文件
+     stat，带进度回调）；冷启动**先校验 XML/full 记录再构建**，美术/shallow
+     记录先以 `validated:false` 预播种（phase A 只登记不消费，避免 stat 2.6GB
+     模型），在 phase A 发布后的回调里校验并进入 phase B——phase A 可用时间
+     从 ~34s 提前到 ~16s，且不牺牲“未校验缓存不可信”的正确性（曾尝试构建后
+     后台校验，既有 I/O 争用又无法事后发现 stat 不可见变化，已放弃）；
+     校验进度写入状态栏（`validating cache N/M…`）并每 1000 条输出一行日志；
+     `DiskCacheLoadStats` 增加 `loadMs` / `validateMs`，输出通道新增
+     `[disk-cache] loaded / validated / saved` 计时与 `[build] wall time`
+     （含缓存加载的总耗时），cacheReport 与状态栏 tooltip 展示校验耗时；
+     输出通道所有日志行自动加本地 `HH:mm:ss.mmm` 时间戳（`ModWorkspace.log`）；
+     修复构建完成后状态栏仍显示 indexing（`building` 置 false 后补一次
+     `updateStatusBar()`）；测试 173 → 175；分析见
+     `docs/analysis-issues.md` 二十六。
+27. [x] CodeLens 与 FAR 使用同一套定义合并路径（2026-08-10）：CodeLens
+     改为通过 `getScope(document)` 取 merged index，并用
+     `definitionsForReference`（文档 local overlay + 全局同名定义）+ 
+     `collectReferenceSites` 计算计数，与 Find All References 严格一致；
+     点击 lens 打开的 references peek（`showReferencesForDef`）同步改为
+     同一逻辑，修复“FAR 有引用但 WeaponTemplate 等 CodeLens 不显示/为 0”
+     的 standalone / 未进全局流文件场景；`scheduleRebuildIfRecordsDesync`
+     在 CodeLens 中也改用 `recordsSyncSurfaceFor(document)`（按文档所属
+     项目自愈）。补充：CodeLens 改用轻量 `getCodeLensScope`（只解析当前
+     文档 + 挂全局索引，不展开 include 链），快照发布后计数即时刷新；
+     仅在尚无全局快照（`stats.indexedFiles === 0`）时不渲染 CodeLens，
+     快照存在后“0 references”仍按设计显示；新增 `onDidChangeCodeLenses`
+     事件在每次快照发布时主动通知 VS Code 重新查询（不再只依赖 refresh
+     命令）；输出通道增加 `[codelens] refresh`（快照发布时低频记录）、
+     `[codelens] suppressed`（首个快照前每个文档只记一次）、scope 异常与
+     超过 250ms 的慢调用记录；另加**全局重试定时器**：构建期间每 2s 重新
+     fire 一次 CodeLens 刷新（`onBuildStart` 启动、`!isBuilding` 停止），
+     避免 VS Code 合并/漏掉单次 refresh 事件导致 phase A 计数迟迟不出现；
+     定时器只在构建期存在，构建结束即清除；测试 175 → 178；分析见
+     `docs/analysis-issues.md` 二十七。
+28. [x] manifest 源地址按 vanilla-only 解析（2026-08-10）：新增
+     `buildVanillaSearchPaths(sdkDir)`，`manifestSource` 只按
+     `[SDK根, SDK\SageXml]`（ART/AUDIO 同理）解析，不再使用当前项目 BAB
+     顺序；修复 mod 同名 `DATA:globaldata/weapon.xml` 遮蔽导致 manifest
+     定义跳不到 SageXml 的问题；`referenceIndex` 的 manifest 源归并同步
+     修正；SageXml 源缺失时保持 manifest-only，文件存在但 id 被删时降级
+     到文件顶部；测试 178 → 184；分析见 `docs/analysis-issues.md`
+     二十八。
 
 ## 四、验证结果（实测）
 
@@ -369,7 +438,9 @@ test/
     前缀保护、多行未闭合 `Disposition` 完整链路、闭合引号后补空格、一行一个属性
     换行缩进、新行缩进对齐、标量类型化默认值）、语义 token（标签/属性/值范围、
     合法文档返回空、malformed 返回兜底 token）、include 解析（BAB 顺序、SDK 根
-    优先于 SageXml）、manifest 二进制解析（合成 v5 样本、类型/ID 推导）、索引器
+    优先于 SageXml；manifest 源 vanilla-only：mod 同名遮蔽仍命中 SageXml、
+    源缺失保持 manifest-only、id 被删降级文件顶部）、manifest 二进制解析
+    （合成 v5 样本、类型/ID 推导）、索引器
     （资产/Define/流/缺失 include/嵌套 xi:include）、XSD 模型（上下文类型、
     `childTypeOf`、大小写规范化、属性级 refType、外来命名空间判定、`xs:list`
     枚举继承与 `isList` 标记）、引用过滤（`Weapon="X"` 只跳 `WeaponTemplate`、

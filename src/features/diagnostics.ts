@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { LineMap, type XmlElement } from "../language/xmlParser";
 import { resolveElementType } from "../language/typeContext";
 import { resolveSource, buildSearchPaths } from "../indexer/includeResolver";
+import { validateSdkPath } from "../sdk";
 import * as model from "../model/schemaModel";
 import type { ModWorkspace } from "../workspace";
 import type { ModIndex } from "../indexer/types";
@@ -18,9 +19,20 @@ import { scopePathKey } from "../indexer/localScope";
 
 export class Ra3Diagnostics {
   private collection: vscode.DiagnosticCollection;
+  private sdkCache: { path: string; unusable: boolean } | null = null;
 
   constructor(private ws: ModWorkspace) {
     this.collection = vscode.languages.createDiagnosticCollection("ra3modxml");
+  }
+
+  /** True when the SDK is missing or not an SDK root (project-only mode). */
+  private sdkUnusable(): boolean {
+    const path = this.ws.settings.sdkPath;
+    if (this.sdkCache?.path === path) return this.sdkCache.unusable;
+    const status = validateSdkPath(path).status;
+    const unusable = status === "missing" || status === "not-sdk";
+    this.sdkCache = { path, unusable };
+    return unusable;
   }
 
   async update(document: vscode.TextDocument): Promise<void> {
@@ -429,7 +441,7 @@ export class Ra3Diagnostics {
     if (!sourceAttr?.hasValue) return;
     const searchPaths = idx
       ? buildSearchPaths(idx.sdkDir, idx.projectDir)
-      : this.ws.searchPaths();
+      : this.ws.searchPaths(document);
     if (!searchPaths) return;
     const resolved = resolveSource(
       sourceAttr.value,
@@ -439,6 +451,11 @@ export class Ra3Diagnostics {
     const candidateHit =
       idx?.sourceCandidates.some((c) => c.source === sourceAttr.value) ?? false;
     if (!resolved.path && !candidateHit) {
+      // Without a usable SDK, prefixed includes are expected to be missing;
+      // report one project-level hint instead of warning on every line.
+      if (this.sdkUnusable() && /^(DATA|ART|AUDIO):/i.test(sourceAttr.value.trim())) {
+        return;
+      }
       diags.push(
         this.diag(
           new vscode.Range(

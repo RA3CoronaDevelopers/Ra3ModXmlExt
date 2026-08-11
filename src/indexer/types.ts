@@ -20,7 +20,12 @@ export interface AssetDef {
   viaInstance?: boolean;
   /** Manifest path for origin === "manifest". */
   manifest?: string;
-  /** Source file recorded inside a manifest (e.g. "DATA:globaldata/armor.xml"). */
+  /**
+   * Source file recorded inside a manifest (e.g. "DATA:globaldata/armor.xml").
+   * This is a path from the vanilla build, so callers resolve it with the
+   * SDK-only search paths (`buildVanillaSearchPaths`), never with the current
+   * mod's BAB include order.
+   */
   manifestSource?: string;
 }
 

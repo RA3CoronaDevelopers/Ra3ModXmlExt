@@ -454,20 +454,41 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     make: (label: string, kind: vscode.CompletionItemKind, detail: string, doc?: string) => vscode.CompletionItem,
   ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const lower = prefix.toLowerCase();
-    const scored: { def: AssetDef; score: number }[] = [];
+    // Deduplicate by id: the same asset can be defined in several places at
+    // once (current file's local overlay + global index, project XML +
+    // compiled manifest, or an override). Showing one completion entry per
+    // id is enough; the other definitions are listed in the documentation.
+    // Definitions are still de-duplicated by (type, id, file, line) so the
+    // same record found through both local and global maps is not repeated
+    // inside a single entry either.
     const seen = new Set<string>();
+    const byId = new Map<
+      string,
+      { best: { def: AssetDef; score: number }; extras: AssetDef[] }
+    >();
 
     const consider = (def: AssetDef) => {
-      const key = `${def.type}:${def.id.toLowerCase()}:${def.file}:${def.line}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      if (!def.id.toLowerCase().startsWith(lower)) return;
+      const defKey = `${def.type}:${def.id.toLowerCase()}:${def.file}:${def.line}`;
+      if (seen.has(defKey)) return;
+      seen.add(defKey);
+      const idKey = def.id.toLowerCase();
+      if (!idKey.startsWith(lower)) return;
       let score = 3;
       if (refType && model.isAssignableTo(def.type, refType)) score = 1;
       if (selfType && model.isAssignableTo(def.type, selfType)) score = 0;
       if (def.origin === "project") score -= 0.2;
       if (def.stream === "local") score -= 0.4;
-      scored.push({ def, score });
+      const entry = byId.get(idKey);
+      if (!entry) {
+        byId.set(idKey, { best: { def, score }, extras: [] });
+        return;
+      }
+      if (score < entry.best.score) {
+        entry.extras.push(entry.best.def);
+        entry.best = { def, score };
+      } else {
+        entry.extras.push(def);
+      }
     };
 
     const targetType = selfType ?? refType;
@@ -492,17 +513,28 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       }
     }
 
-    const top = topScoredDefs(scored, MAX_VALUE_ITEMS);
+    const entries = [...byId.values()];
+    const top = topScoredDefs(
+      entries.map((e) => e.best),
+      MAX_VALUE_ITEMS,
+    );
     const items = top.map(({ def }) => {
-      const origin = def.origin === "manifest" ? `manifest (${def.manifestSource ?? ""})` : def.origin;
+      const originLabel = (d: AssetDef) =>
+        d.origin === "manifest" ? `manifest (${d.manifestSource ?? ""})` : d.origin;
+      const origin = originLabel(def);
       const doc = new vscode.MarkdownString();
       doc.appendCodeblock(def.id);
       doc.appendMarkdown(`**Type**: ${def.type}  \n`);
       if (def.manifestSource) doc.appendMarkdown(`**Source**: ${def.manifestSource}  \n`);
       doc.appendMarkdown(`**Origin**: ${origin}`);
+      for (const extra of byId.get(def.id.toLowerCase())?.extras ?? []) {
+        doc.appendMarkdown(
+          `\n\nAlso defined as **${extra.type}** · ${originLabel(extra)}`,
+        );
+      }
       return make(def.id, vscode.CompletionItemKind.Value, `${def.type} · ${origin}`, doc.value);
     });
-    return this.limitItems(items, scored.length);
+    return this.limitItems(items, byId.size);
   }
 
   private defineItems(
@@ -512,13 +544,16 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
   ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const lower = prefix.replace(/^[=$]*/, "").toLowerCase();
     const items: vscode.CompletionItem[] = [];
+    // The same define can be visible through both the local overlay and the
+    // global index; show one entry per name (local definitions win because
+    // they are iterated first).
     const seen = new Set<string>();
     for (const defines of [idx.local?.defines, idx.defines]) {
       if (!defines) continue;
       for (const [key, defs] of defines) {
         if (!key.includes(lower)) continue;
         const def = defs[0];
-        const dedupe = `${def.name.toLowerCase()}:${def.file}:${def.line}`;
+        const dedupe = def.name.toLowerCase();
         if (seen.has(dedupe)) continue;
         seen.add(dedupe);
         const label = `$${def.name}`;
@@ -816,9 +851,17 @@ function attributeInsertLayout(
   const wordStart = findAttributeWordStart(text, offset, el.start);
   const attrs = el.attrs;
   const complete = attrs.filter((a) => a.hasValue);
-  const last = complete.length ? complete[complete.length - 1] : null;
+  // Only attributes that end before the cursor decide whether the completed
+  // attribute is already on its own line. The tag's last complete attribute
+  // may still be AFTER the cursor when the user inserts a new attribute in
+  // the middle of a one-per-line tag; using it here would wrongly re-wrap.
+  const beforeCursor = complete.filter((a) => attributeEndOffset(a) <= offset);
+  const last = beforeCursor.length ? beforeCursor[beforeCursor.length - 1] : null;
   const lastEnd = last ? attributeEndOffset(last) : -1;
-  const alreadyOnNewLine = lastEnd >= 0 && text.slice(lastEnd, offset).includes("\n");
+  const alreadyOnNewLine =
+    lastEnd >= 0
+      ? text.slice(lastEnd, offset).includes("\n")
+      : text.slice(el.start + 1 + el.name.length, offset).includes("\n");
 
   // Canonical indent anchor: the first complete attribute that starts on its
   // own line. Fall back to the last complete attribute for inline elements.
@@ -838,31 +881,34 @@ function attributeInsertLayout(
     ? text.slice(0, anchor.nameStart).match(/[ \t]*$/)?.[0] ?? ""
     : "";
 
-  if (!onePerLine) {
-    if (alreadyOnNewLine) {
-      // Inline-style file, but the user started a new line: keep whatever
-      // indentation they already typed.
-      return { rangeStart: wordStart, prefix: "" };
-    }
-    const needsSpace = wordStart > el.start + 1 && !/\s/.test(text[wordStart - 1]);
-    return { rangeStart: wordStart, prefix: needsSpace ? " " : "" };
-  }
   if (alreadyOnNewLine) {
-    const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
-    return { rangeStart: lineStart, prefix: indent };
+    // The attribute being completed is already on its own line: never insert
+    // another newline. In one-per-line files align with the canonical indent;
+    // in inline files keep whatever indentation the user already typed.
+    if (onePerLine) {
+      const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+      return { rangeStart: lineStart, prefix: indent };
+    }
+    return { rangeStart: wordStart, prefix: "" };
   }
-  // Insert on a new line. The editor adds the current line's indentation to
-  // the new line, so we must NOT embed our own indent here (it would
-  // compound). If whitespace was typed between the previous attribute and
-  // the cursor (e.g. a space used to trigger the suggestion popup), consume
-  // it so it does not linger as a trailing space.
-  const wsStart =
-    lastEnd >= 0 &&
-    wordStart > lastEnd &&
-    /^[ \t]*$/.test(text.slice(lastEnd, wordStart))
-      ? lastEnd
-      : wordStart;
-  return { rangeStart: wsStart, prefix: "\n" };
+  // The cursor sits on the same line as the element name or a complete
+  // attribute: the completed attribute would be the second one on that line.
+  if (onePerLine) {
+    // Insert on a new line. The editor adds the current line's indentation
+    // to the new line, so we must NOT embed our own indent here (it would
+    // compound). If whitespace was typed between the previous attribute and
+    // the cursor (e.g. a space used to trigger the suggestion popup), consume
+    // it so it does not linger as a trailing space.
+    const wsStart =
+      lastEnd >= 0 &&
+      wordStart > lastEnd &&
+      /^[ \t]*$/.test(text.slice(lastEnd, wordStart))
+        ? lastEnd
+        : wordStart;
+    return { rangeStart: wsStart, prefix: "\n" };
+  }
+  const needsSpace = wordStart > el.start + 1 && !/\s/.test(text[wordStart - 1]);
+  return { rangeStart: wordStart, prefix: needsSpace ? " " : "" };
 }
 
 function attributeEndOffset(attr: XmlAttribute): number {

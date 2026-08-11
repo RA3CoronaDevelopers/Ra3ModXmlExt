@@ -148,6 +148,14 @@ export interface IndexRecordsCacheEntry {
    * produced before this field existed.
    */
   contentHash?: string;
+  /**
+   * False when the entry was seeded from disk but its stat has not been
+   * checked against the current disk yet. Such entries may only be used
+   * for deferred art registration during phase A; the indexer must not
+   * consume their records until `validated` is true (set by the stat pass
+   * or by a build that re-read the file).
+   */
+  validated?: boolean;
 }
 
 /**

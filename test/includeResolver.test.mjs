@@ -2,8 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   buildSearchPaths,
+  buildVanillaSearchPaths,
   resolveSource,
   manifestPathForReference,
 } from "../out/indexer/includeResolver.js";
@@ -79,6 +82,94 @@ test("DATA:Static.xml prefers the SDK root over SageXml", () => {
   // the SDK root placeholder first.
   const r = resolveSource("DATA:Static.xml", null, paths);
   assert.equal(r.path, join(sdk, "Static.xml"));
+});
+
+test("vanilla search paths stay inside the SDK", () => {
+  const vanilla = buildVanillaSearchPaths(sdk);
+  assert.deepEqual(vanilla.DATA, [sdk, join(sdk, "SageXml")]);
+  assert.deepEqual(vanilla.ART, [sdk, join(sdk, "Art")]);
+  assert.deepEqual(vanilla.AUDIO, [sdk, join(sdk, "Audio")]);
+});
+
+test("empty SDK path produces project-only search paths", () => {
+  const modParent = dirname(project);
+  const granParent = dirname(modParent);
+  const paths = buildSearchPaths("", project);
+  assert.deepEqual(paths.DATA, [
+    granParent,
+    join(project, "Data"),
+    modParent,
+  ]);
+  assert.deepEqual(paths.ART, [
+    granParent,
+    join(project, "Art1"),
+    join(project, "Art"),
+    modParent,
+  ]);
+  assert.deepEqual(paths.AUDIO, [
+    granParent,
+    join(project, "Audio1"),
+    join(project, "Audio"),
+    modParent,
+  ]);
+  const r = resolveSource("DATA:static.xml", null, paths);
+  assert.equal(r.path, null, "DATA: include never falls back to the cwd");
+
+  const vanilla = buildVanillaSearchPaths("");
+  assert.deepEqual(vanilla.DATA, []);
+  assert.deepEqual(vanilla.ART, []);
+  assert.deepEqual(vanilla.AUDIO, []);
+});
+
+test("manifest sources resolve with vanilla-only paths (mod shadow ignored)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ra3-vanilla-"));
+  try {
+    const sdkDir = join(tmp, "sdk");
+    const projectDir = join(tmp, "project");
+    const rel = "globaldata/weapon.xml";
+    const sageFile = join(sdkDir, "SageXml", rel);
+    const modFile = join(projectDir, "Data", rel);
+    mkdirSync(dirname(sageFile), { recursive: true });
+    mkdirSync(dirname(modFile), { recursive: true });
+    writeFileSync(sageFile, "<AssetDeclaration/>", "utf8");
+    writeFileSync(modFile, "<AssetDeclaration/>", "utf8");
+
+    const normal = resolveSource(
+      "DATA:globaldata/weapon.xml",
+      null,
+      buildSearchPaths(sdkDir, projectDir),
+    );
+    const vanilla = resolveSource(
+      "DATA:globaldata/weapon.xml",
+      null,
+      buildVanillaSearchPaths(sdkDir),
+    );
+
+    assert.equal(normal.path, modFile, "normal BAB order picks the mod file");
+    assert.equal(vanilla.path, sageFile, "manifest source stays on SageXml");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("missing vanilla source returns null even when the project shadows the path", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ra3-vanilla-missing-"));
+  try {
+    const sdkDir = join(tmp, "sdk");
+    const projectDir = join(tmp, "project");
+    const modFile = join(projectDir, "Data", "globaldata", "weapon.xml");
+    mkdirSync(dirname(modFile), { recursive: true });
+    writeFileSync(modFile, "<AssetDeclaration/>", "utf8");
+
+    const vanilla = resolveSource(
+      "DATA:globaldata/weapon.xml",
+      null,
+      buildVanillaSearchPaths(sdkDir),
+    );
+    assert.equal(vanilla.path, null);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("manifest mapping strips the prefix", () => {

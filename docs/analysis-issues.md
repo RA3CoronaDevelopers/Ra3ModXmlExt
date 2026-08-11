@@ -325,69 +325,6 @@ hover 同时显示 `No matching definition of the expected declared type...`。
 
 ---
 
-## 十、问题分析（第五轮，2026-08-01）：`xi:include` 的 `href`/`xpointer` 误报未知属性
-
-### 问题
-
-AttachTest `Allied Vehicle\Guardian Tank\GameObject.xml` 第 249 行附近：
-
-```xml
-<xi:include
-    href="DATA:Includes/HeadlightDraw2.xml"
-    xpointer="xmlns(n=uri:ea.com:eala:asset) xpointer(/n:HeadlightDraw2/child::*)"/>
-```
-
-报两条 `Unknown attribute "href" / "xpointer" for <include>`（`unknown-attribute`），
-hover 同时显示 `Unknown attribute for this element.`。
-
-这个元素属于 **W3C XInclude 命名空间**（`xmlns:xi="http://www.w3.org/2001/XInclude"`），
-并不是 EA `uri:ea.com:eala:asset` XSD 的一部分。同一行在第二轮“问题 C”处理过
-（嵌套 `xi:include` 的索引与导航），但那轮没有覆盖 unknown-attribute 诊断，属于遗留缺口。
-
-### 根因
-
-诊断的属性校验没有像元素校验那样排除外来命名空间：
-
-- 元素校验已有 `!el.name.startsWith("xi:")` 守卫（所以 `<include>` 本身不报 unknown element）；
-- 属性校验只跳过 `xmlns*` / `xai:` / `xi:` 前缀的属性名，而 `href`、`xpointer` 是不带
-  前缀的普通属性名；
-- `<xi:include>` 解析类型为 null（XSD 模型不含该元素），knownAttrs 为空 → 任何属性
-  都被判为 unknown。
-
-### 修复
-
-1. `schemaModel` 新增两个纯函数：
-   - `isXsdElementName`：`xi:` 前缀元素不属于 EA XSD 模型；
-   - `isXsdAttributeName`：EA XSD 属性不带命名空间前缀，带前缀（`xai:`、`xi:`、
-     `xlink:`、`xml:`、`xsi:`、`xmlns:*`）的都是命名空间机制，不做 schema 校验。
-2. `diagnostics`：`xi:` 前缀元素整体跳过 schema 校验（元素与属性都不再误报）；
-   前缀属性名统一跳过。
-3. `hover`：`xi:include` 元素/属性给出 XInclude 说明；`href` 值悬停像
-   `<Include source>` 一样解析目标文件（Ctrl+点击跳转此前已可用）。
-
-### 验证
-
-- 真实文件全量扫描：0 未知元素、0 未知属性（修复前 `href`/`xpointer` 两条必现）；
-- 新增测试：`isXsdElementName` / `isXsdAttributeName` 断言；`xi:include` 解析类型为
-  null 且不参与校验；全量 39/39 通过。
-
-### 后续（架构方向，待确认）
-
-用户提出“先展开 `xi:include`（类比 C++ 宏展开），再处理 mod XML 解析”。该方向与第二轮
-遗留的“虚拟合并”开放项一致，设计要点：
-
-- 构建**逻辑树**而非文本拼接：把目标文件选中内容（`xpointer` 子集）作为子节点拼入父
-  元素，节点保留源文件与原始偏移，避免文本级拼接导致的偏移断裂；
-- 展开范围：`xi:include` 与 EA `<Include type="all">`（内容合并）；`instance` /
-  `reference` 是可见性 / 编译产物语义，不拼树；`inheritFrom` + `joinAction` 是属性级
-  继承合并，不是宏展开；
-- 收益：跨 include 的上下文类型解析、包含内容的结构校验、以及后续“GameObject 内模块
-  id 局部作用域”（HeadlightDraw2 的模块也是该 GameObject 的模块）；
-- 风险：include 环 / 深度限制、大文件性能、`xpointer` 仅支持现有子集形式
-  （`/n:Name/child::*`）。
-
----
-
 ## 十、问题分析（第五轮，2026-08-01）：`xi:include` 的 `href` / `xpointer` 被误报为未知属性
 
 ### 问题
@@ -1624,3 +1561,255 @@ WarheadTemplate="..."` 引用。该问题在移动硬盘重连 + 重新打开工
 只要文件被打开并触发 CodeLens / FAR，不一致就会被检测并定向修复。
 
 版本 **0.1.17 → 0.1.18**。
+
+---
+
+## 二十五、问题分析（2026-08-07）：属性补全换行误判与补全项重复
+
+### 现象
+
+1. 属性名补全的“自动换行”在属性已经位于自己单独一行时仍会再插一个换行：
+   例如在 one-per-line 标签中间插入新属性（光标行已有半截属性名，后面还有
+   其他属性）时，接受补全会多出一个空行。正确规则是：只有“同一行上的第二个
+   属性”才换行；光标已经在自己单独一行时不应换行。
+2. 属性值补全出现两条完全相同的值，例如 `ProjectileNugget@WarheadTemplate`
+   中 `AlliedCommandoDesertEaglesWarhead` 出现两遍。
+
+### 根因
+
+1. `attributeInsertLayout` 判断“是否已在新行”时用的是标签内**最后一个完整
+   属性**的结束位置，而没考虑它是否位于光标之前。在 one-per-line 标签中间
+   插入时，光标后面的属性会让 `alreadyOnNewLine` 误判为 false，于是再次插入
+   `\n`。同理，在第一个属性之前的新行上补全也会因“面前没有完整属性”而误换行。
+2. `assetIdItems` 只按 `(类型, id, 文件, 行)` 去重。同一个 ID 可以同时出现在
+   当前文档局部 overlay（未保存文本的行号与磁盘不同）与全局索引中，也可以
+   同时出现在项目 XML 与编译 manifest 中——不同文件/行号不会被去重，于是同一
+   个值出现两条。
+
+### 修复
+
+1. **换行判定只看光标之前的属性**：`attributeInsertLayout` 先过滤出结束位置
+   在光标之前的完整属性，再判断光标是否与它们同处一行；没有前置属性时，用
+   元素名与光标之间是否有换行判断是否已在自己一行。已在新行时不再插入换行，
+   one-per-line 风格下仍用规范缩进替换当前行空白；同一行第二个属性仍按原有
+   规则换行；元素名同一行补首个属性时（文件为 one-per-line）仍保留换行行为。
+2. **值补全按 id 去重**：`assetIdItems` 改为先按 `(类型, id, 文件, 行)` 去掉
+   同一份定义，再按 id（大小写不敏感）合并为一个补全项，保留分数最高的定义
+   （local > project > sdk/manifest），其余定义在文档说明中列出
+   （“Also defined as …”）。`defineItems` 同步改为按 define 名去重，局部定义
+   优先。
+
+### 验证（169 → 173 全绿）
+
+- one-per-line 标签中间插入：不再插入换行，range 覆盖当前行空白与半截属性名；
+- 第一个属性之前的新行补全：不换行，按规范缩进对齐；
+- 元素名同一行补首个属性（one-per-line 文件）：仍换行；
+- 同一 ID 同时存在于局部 overlay / 全局索引 / manifest：只出现一个补全项，
+  文档中列出其它定义位置。
+
+版本 **0.1.19 → 0.1.20**。
+
+---
+
+## 二十六、问题分析（2026-08-08）：磁盘缓存校验阻塞与日志可观测性
+
+### 现象
+
+清缓存 / 冷启动时“validating cache”耗时很长，但输出通道只有构建开始和结束
+两行，看不到校验花了多久；构建日志显示 `done in 1.6s`、索引已完整，但 VS Code
+状态栏仍停留在“indexing”。
+
+### 根因
+
+1. `seedRecordsFromDisk` 在构建前 `await loadValidated()`，对全部 8,976 条缓存
+   记录逐文件 stat（机械盘可达数十秒），且这段耗时没有任何日志；构建计时从
+   `runBuild` 才开始，日志里自然看不到。
+2. `publishIndex` 发布最终快照时 `state.building` 仍为 true，`updateStatusBar()`
+   只会显示“indexing…”；`finally` 把 `building` 置 false 后没有再次刷新状态栏，
+   于是状态栏一直停在 indexing。
+
+### 修复
+
+1. **校验仍是快速构建的前置条件**：`DiskRecordsCache` 拆为 `load()`（读 +
+   gunzip + JSON，快）与 `validate()`（逐文件 stat）。冷启动**先校验后构建**：
+   只有 stat 与当前磁盘一致的记录才播种进共享 recordsCache，过期条目在构建时
+   重新读取。曾尝试“先快速构建、构建后后台校验”，但快速路径
+   （`trustUnchanged=true`）会直接信任未校验的 recordsCache 条目，可能发布
+   过期 index；后台校验只能事后发现 stat 可见的变化，stat 不可见变化（同
+   size/mtime/ctime 的重写）无法事后发现。同时并发校验会与索引器抢机械盘
+   I/O，实测把信任构建从 1.6s 拖到 25s（walk 17s / candidates 6.3s），因此
+   该方案已放弃，恢复“校验通过才允许快速构建”的不变量。
+
+   进一步优化为**分阶段校验**：full XML 记录先校验（约一半，~15s），构建随即
+   开始并发布 phase A；shallow 美术记录先以 `validated:false` 预播种，phase A
+   的 `readDocument` 只把它当“待扫描登记”用（不消费记录、不 stat 2.6GB 模型），
+   在 phase A 发布回调里校验并标记 `validated:true`，phase B 直接命中缓存。
+   结果：phase A 可用时间从 ~34s 降到 ~16s，最终完成时间基本不变，正确性不变。
+
+2. **校验进度可视化**：`validate()` 增加 `onProgress` 回调，状态栏显示
+   `validating cache N/M…` / `validating art cache N/M…`，输出通道每校验
+   1000 条输出一行进度，避免长时间无反馈。
+3. **日志补齐计时**：新增 `[disk-cache] loaded … in Xs`、
+   `[disk-cache] validated … in Xs (dropped=N)`、`[disk-cache] saved … in Xs`
+   以及 `[build] wall time …`（含缓存加载的总耗时）；`DiskCacheLoadStats`
+   增加 `loadMs` / `validateMs`，cacheReport 与状态栏 tooltip 一并展示；
+   输出通道所有日志行统一自动加本地 `HH:mm:ss.mmm` 时间戳，方便对照
+   watcher / build / disk-cache 事件的先后顺序。
+4. **状态栏修复**：`finally` 中 `building = false` 后调用 `updateStatusBar()`，
+   构建完成后不再卡在 indexing；校验阶段状态栏直接显示
+   `validating cache…` / `validating art cache…` 及计数。
+
+### 验证（173 → 176 全绿）
+
+- `load()` 不做 stat 校验，`validate()` 返回 `kept` / `invalidKeys` 与
+  validated / dropped / validateMs 统计，`onProgress` 单调递增到总数；
+- 变更 / 缺失条目被报告并触发重建，有效条目保留；
+- 未校验的 shallow 条目在 phase A 只登记不消费，phase B stat 校验后命中缓存
+  不再重扫；
+- 全量 176 个测试通过，esbuild 产物已更新。
+
+---
+
+## 二十七、问题分析（2026-08-10）：CodeLens 与 FAR 定义合并路径不一致
+
+### 现象
+
+Corona 项目中 `WeaponTemplate` 不再显示 CodeLens 引用计数（或显示 0），但
+右键菜单 Find All References 仍能查到引用。
+
+### 根因
+
+CodeLens 只查“全局 index 中当前文件这一条定义”的引用桶
+（`referenceSitesForDefinition`），而 FAR 会把**当前文档的 local overlay** 与
+全局同名定义合并后再收集引用（`definitionsForReference` +
+`collectReferenceSites`）。当文件未进全局 include 流（standalone / 片段文件）
+或定义只存在于 local overlay 时，FAR 能通过全局同名定义找到引用，CodeLens
+却按本地文件 key 精确查表得到 0/空，表现就是“FAR 可用、CodeLens 消失”。
+
+### 修复
+
+1. `Ra3CodeLensProvider` 改为 async，通过 `ws.getCodeLensScope(document)` 取
+   merged index（当前文档 local overlay + 全局 index），并用与 FAR 相同的
+   `definitionsForReference` + `collectReferenceSites` 计算计数；
+2. `showReferencesForDef`（点击 lens 打开的 references peek）同步改为同一
+   逻辑，保证显示的数字与打开的 peek 严格一致；
+3. CodeLens 的 records-desync 自愈改用 `recordsSyncSurfaceFor(document)`，
+   与 FAR 一样按文档所属项目定向修复，而不是活动项目。
+
+### 刷新体验与 0 显示
+
+- CodeLens 使用轻量 `getCodeLensScope`（只解析当前文档 + 挂全局 index，不
+  展开 include 链），快照发布后的 `editor.action.codeLens.refresh` 即时返回
+  新计数；
+- Provider 实现 `onDidChangeCodeLenses` 事件，`onIndexUpdate` 在每次快照
+  发布时主动 fire，VS Code 立即重新查询（不依赖 refresh 命令是否生效）；
+- **全局重试定时器**：`onBuildStart` 启动一个 2s 间隔的定时器，只要
+  `ws.isBuilding()` 为 true 就重新 fire CodeLens 刷新；构建结束即停止。
+  用于兜底 VS Code 对单次 refresh 事件的合并/延迟，保证 phase A 的计数
+  不会等到 final 才上屏。定时器为全局单实例、仅构建期存在，不随文档数
+  放大；
+- 日志：每次快照发布记录 `[codelens] refresh (project/phase/assets/...)`；
+  首个快照前每个文档只记一次 `[codelens] suppressed`；scope 异常和超过
+  250ms 的慢 provider 调用也会记录。refresh 事件频率等于快照发布次数
+  （低频），不会按每次 VS Code 查询记录，避免大项目刷屏；
+- 在**第一个全局快照发布前**（`stats.indexedFiles === 0` 的本地-only index）
+  不渲染任何 CodeLens，避免冷启动期间满屏误导性的 0 references；
+- 一旦存在真实快照，“0 references”仍按设计显示（参考目标类型 0 也显示，
+  点击可打开空 peek 作为“未引用”信号）。
+
+### 重新评估（2026-08-10）
+
+- **与 FAR 的一致性**：CodeLens 只渲染当前文档的顶层资产，cheap scope 的
+  overlay 已覆盖这些资产；反向索引的引用站点挂在**每个匹配定义**上，因此
+  当前文档定义 + 全局同名定义的并集与 FAR 的 full-scope 并集在计数上一致。
+  仅存在于 include 链、且不在全局 index 中的定义没有反向引用桶，full scope
+  也不会多出站点，故不构成计数差异。
+- **0 显示语义**：按文档需求“参考目标类型 0 也显示”，隐藏逻辑收窄为
+  “尚无全局快照”，避免小项目 phase A 后仍被隐藏。
+- **已知边界**：CodeLens 计数与“从该 id 发起 FAR”完全一致，因此同名 id
+  跨类型时会把各类型定义的反向站点合并计数——这是 FAR 既有语义，CodeLens
+  与其保持一致，不再按类型收窄。
+
+### 验证（175 → 178 全绿）
+
+- CodeLens 与 FAR 共享定义合并路径后，standalone 文件中 WeaponTemplate
+  的计数与 FAR 结果一致；
+- 点击 lens 打开的 peek 与计数一致；
+- 尚无全局快照时不渲染 CodeLens，快照存在后 0 references 仍显示；
+- `onDidChangeCodeLenses` 在 refresh 时触发；测试 shim 不再提供
+  `indexForDocument`/`activeIndex`，若实现回退到旧的 index 查找方式会直接
+  测试失败；
+- 原有 manifest 源引用归并、0 引用显示、desync 自愈测试全部保持。
+
+---
+
+## 二十八、问题分析（2026-08-10）：manifest 源地址被 mod 同名 DATA 路径遮蔽
+
+### 现象
+
+Corona `Data\Allied\Units\AlliedCommandoTech1.xml` 中
+`Template="AlliedCommandoDesertEagles"` 的 Ctrl+点击有两个候选：
+
+- mod 定义：正常；
+- 原版 manifest 定义：`manifestSource` 是 `DATA:globaldata/weapon.xml`，
+  但它没有跳到 `SageXml\globaldata\weapon.xml`，而是打开 mod 自己的
+  `Data\globaldata\weapon.xml`（915 字节的 Include 汇总文件，不含该 id）。
+
+### 根因
+
+`manifestSource` 记录的是**原版 manifest 编译时该资产的源地址**，不是
+“当前 mod 按 BAB Include 规则会命中哪个文件”。旧代码在
+`src/features/navigation.ts` 的 `assetDefLocation()` 里用
+`resolveSource(src, null, searchPathsFor(idx))` 解析它，而
+`searchPathsFor(idx)` 是当前项目的 BAB 搜索顺序——项目 `Data` 在
+`SageXml` 之前。于是只要 mod 同名遮蔽了 `DATA:globaldata/weapon.xml`，
+manifest 候选就会被劫持到 mod 文件。
+
+同一语义混淆也存在于 `src/indexer/referenceIndex.ts` 的
+`referenceSitesForDefinition()`：它用当前项目搜索路径判断 manifest 定义
+是否对应某个源码文件，同样会被遮蔽路径带偏。
+
+### 实测证据
+
+- `static.manifest` 中确有
+  `WeaponTemplate:AlliedCommandoDesertEagles`，
+  `sourceFileName = "DATA:globaldata/weapon.xml"`；
+- `Data\globaldata\weapon.xml`（mod）与
+  `SageXml\globaldata\weapon.xml`（原版）都存在，后者 277 KB，
+  该 id 在第 1093 行；
+- 当前 BAB 顺序解析返回 mod 文件；只按 `[SDK根, SDK\SageXml]` 解析则返回
+  `SageXml\globaldata\weapon.xml`；
+- 对 `static.manifest` 全部 DATA 源扫描：1874 个都存在于 `SageXml`，
+  其中 172 个被 Corona `Data` 同名遮蔽。说明这是普遍现象，不是个别文件。
+
+### 修复
+
+1. `src/indexer/includeResolver.ts` 新增 `buildVanillaSearchPaths(sdkDir)`：
+   DATA 只搜 `[SDK根, SDK\SageXml]`，ART / AUDIO 同理只搜 SDK 目录
+   （当前 SDK 基本没有 art/audio 源码，保持“找不到就 manifest-only”）。
+2. `src/features/navigation.ts` 的 manifest 定义跳转改用 vanilla-only 路径；
+   普通 `<Include>` / `xi:include` 仍使用当前项目 BAB 顺序，不受影响。
+3. `src/indexer/referenceIndex.ts` 的 manifest 源归并同步改用 vanilla-only
+   路径，避免把 manifest 引用错误归并到 mod 同名文件。
+4. 边界处理：
+   - `SageXml` 源文件缺失（用户删除/改名）：manifest 候选保持
+     manifest-only，不跳到 mod 遮蔽文件；
+   - 源文件存在但 id 已被移除（用户修改 SageXml）：跳到该文件顶部，
+     不做虚假的精确定位；
+   - 只要 `SageXml` 中仍有该 id，就精确跳转（与既有问题 C 的行为一致）。
+   - 当前实现不读取 `ra3modxml.indexSageXml`：manifest 导航始终尝试解析
+     SageXml 源码（这只影响“跳到哪里”，不影响是否把 SageXml 纳入索引）；
+     如需让导航也跟随该设置，可后续加开关。
+
+### 测试（178 → 184 全绿）
+
+- `includeResolver.test.mjs`：`buildVanillaSearchPaths` 结构断言；mod 同名
+  遮蔽时普通 BAB 解析命中 mod、vanilla-only 命中 SageXml；vanilla 源缺失时
+  即使 mod 遮蔽也返回 null；
+- `referenceIndex.test.mjs`：manifest 源归并只命中 SageXml 文件，同名 mod
+  文件不继承引用站点；
+- `contentFeatures.test.mjs`：Ctrl+点击 manifest 定义命中 SageXml 而非 mod
+  遮蔽文件；SageXml 源缺失时不跳 mod；文件存在但 id 被删时降到文件顶部。
+
+> 备注：ART/AUDIO 源映射按用户意见不作为本轮目标；`buildVanillaSearchPaths`
+> 已包含对应 SDK 目录，将来若有源码可直接复用。

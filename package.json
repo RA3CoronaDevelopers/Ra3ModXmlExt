@@ -2,9 +2,9 @@
   "name": "ra3-mod-xml",
   "displayName": "RA3 Mod XML",
   "description": "Red Alert 3 Mod XML tooling: syntax highlighting, completions, reference navigation and diagnostics for SAGE/BinaryAssetBuilder XML.",
-  "version": "0.1.18",
+  "version": "0.1.20",
   "publisher": "ra3-mod-xml",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -23,9 +23,13 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onLanguage:xml",
+    "workspaceContains:Mod.xml",
+    "workspaceContains:additionalmaps/mapmetadata_*.xml",
     "workspaceContains:**/Data/Mod.xml",
+    "workspaceContains:**/Data/additionalmaps/mapmetadata_*.xml",
     "workspaceContains:**/mod.babproj",
-    "workspaceContains:**/*.babproj"
+    "workspaceContains:**/*.babproj",
+    "onCommand:ra3modxml.configureSdkPath"
   ],
   "contributes": {
     "grammars": [
@@ -42,8 +46,8 @@
       "properties": {
         "ra3modxml.sdkPath": {
           "type": "string",
-          "default": "C:\\Apps\\RA3-MODSDK-X",
-          "description": "Path to the RA3 Mod SDK root. Used to resolve DATA:/ART:/AUDIO: includes and to index vanilla SageXml sources."
+          "default": "",
+          "description": "Path to the RA3 Mod SDK root. Used to resolve DATA:/ART:/AUDIO: includes and to index vanilla SageXml sources. Leave empty to disable vanilla SDK features (project-only mode)."
         },
         "ra3modxml.indexSageXml": {
           "type": "boolean",
@@ -96,6 +100,10 @@
       {
         "command": "ra3modxml.clearCache",
         "title": "RA3 Mod XML: Clear caches and rebuild"
+      },
+      {
+        "command": "ra3modxml.configureSdkPath",
+        "title": "RA3 Mod XML: Configure SDK path…"
       },
       {
         "command": "ra3modxml.showCacheReport",

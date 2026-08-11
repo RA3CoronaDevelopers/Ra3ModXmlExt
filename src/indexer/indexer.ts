@@ -27,6 +27,7 @@ import {
   type ResolveResult,
   type SearchPaths,
 } from "./includeResolver";
+import { validateSdkPath } from "../sdk";
 import {
   buildExistenceSnapshot,
   type ExistenceSnapshot,
@@ -140,11 +141,17 @@ export class ModIndexer {
   private visitedAll = new Set<string>();
   private visitedInstance = new Set<string>();
   private manifestAssetKeys = new Set<string>();
+  /** True when the SDK is missing/not an SDK: SDK-only includes are suppressed. */
+  private sdkUnusable: boolean;
+  private suppressedSdkIncludeCount = 0;
 
   constructor(private opts: IndexOptions) {
     this.searchPaths = buildSearchPaths(opts.sdkDir, opts.projectDir, {
       DATA: opts.additionalDataSearchPaths,
     });
+    const sdkStatus = validateSdkPath(opts.sdkDir);
+    this.sdkUnusable =
+      sdkStatus.status === "missing" || sdkStatus.status === "not-sdk";
     // Caches may be owned by the workspace so they survive rebuilds.
     this.docs = opts.documentCache ?? new DocumentCache();
     this.recordsCache = opts.recordsCache ?? new IndexRecordsCache();
@@ -175,7 +182,27 @@ export class ModIndexer {
     // ~2.6 GB of art assets on a mechanical drive).
     if (trust) {
       const rec = this.recordsCache.get(key);
-      if (rec) return this.recordsParsed(path, rec);
+      if (rec) {
+        if (rec.validated === false) {
+          // Seeded from disk but not stat-validated yet. During phase A an
+          // art file only needs registration (no content), so reuse the
+          // cached stamp; its records are consumed only after validation.
+          if (opts?.deferArt && rec.kind === "shallow" && rec.stat) {
+            const file: IndexedFile = { path: resolve(path), stat: rec.stat };
+            this.files.set(key, file);
+            return {
+              file,
+              parse: null,
+              records: null,
+              lineMap: null,
+              deferredArt: true,
+            };
+          }
+          // Fall through: the stat-verifying path below checks this entry.
+        } else {
+          return this.recordsParsed(path, rec);
+        }
+      }
       const cached = this.docs.get(key);
       if (cached) {
         this.files.set(key, cached.file);
@@ -194,6 +221,7 @@ export class ModIndexer {
         rec.stat.birthtimeMs === st.birthtimeMs &&
         rec.stat.ctimeMs === st.ctimeMs
       ) {
+        rec.validated = true;
         // Force rebuilds (Re-index workspace) verify full-XML content even
         // when every stat signal matches: external drives (FAT32/exFAT) can
         // rewrite a file with the same size and coarse timestamps.
@@ -456,6 +484,7 @@ export class ModIndexer {
   async build(onPhase?: (index: ModIndex) => void | Promise<void>): Promise<ModIndex> {
     const start = Date.now();
     this.buildRecords.clear();
+    this.suppressedSdkIncludeCount = 0;
     // Root list only; directories are listed lazily on first query, so the
     // XML phase does not pay an upfront recursive enumeration of the SDK.
     this.existence = buildExistenceSnapshot(this.searchPaths);
@@ -499,6 +528,17 @@ export class ModIndexer {
       }
     }
     this.timings.walkMs = Date.now() - walkStart;
+    if (this.suppressedSdkIncludeCount > 0) {
+      this.diagnostics.push({
+        file:
+          staticEntry ?? join(this.opts.projectDir, "Data"),
+        line: 0,
+        message:
+          "SDK path is not configured or invalid; DATA:/ART:/AUDIO: includes are not resolved (set ra3modxml.sdkPath).",
+        severity: "information",
+        code: "sdk-not-configured",
+      });
+    }
 
     // ── Source completion candidates ──
     const candidatesStart = Date.now();
@@ -533,9 +573,17 @@ export class ModIndexer {
     // global.xml, audio.xml placeholders) but only its shallow XML files are
     // relevant. These candidates take precedence over same-named files found
     // deeper in the search paths (e.g. SageXml/Static.xml).
-    const sdkRootXml = (await readdir(this.opts.sdkDir)).filter(
-      (f) => f.toLowerCase().endsWith(".xml"),
-    );
+    let sdkRootXml: string[] = [];
+    if (this.opts.sdkDir) {
+      try {
+        sdkRootXml = (await readdir(this.opts.sdkDir)).filter(
+          (f) => f.toLowerCase().endsWith(".xml"),
+        );
+      } catch {
+        // Missing/inaccessible SDK root: run in project-only mode. All other
+        // SDK search roots already degrade to empty lists.
+      }
+    }
     const sdkRootCandidates: SourceCandidate[] = sdkRootXml.map((f) => ({
       source: `DATA:${f}`,
       path: resolve(this.opts.sdkDir, f),
@@ -778,6 +826,10 @@ export class ModIndexer {
     for (const inc of records.includes) {
       const resolved = this.resolveCached(inc.source, dirname(file));
       if (!resolved.path) {
+        if (this.shouldSuppressMissingInclude(inc.source)) {
+          this.suppressedSdkIncludeCount++;
+          continue;
+        }
         this.diagnostics.push({
           file,
           line: inc.line,
@@ -808,6 +860,10 @@ export class ModIndexer {
     for (const xi of records.nestedXiIncludes) {
       const resolved = this.resolveCached(xi.href, dirname(file));
       if (!resolved.path) {
+        if (this.shouldSuppressMissingInclude(xi.href)) {
+          this.suppressedSdkIncludeCount++;
+          continue;
+        }
         this.diagnostics.push({
           file,
           line: xi.line,
@@ -839,6 +895,10 @@ export class ModIndexer {
   ): Promise<void> {
     const resolved = this.resolveCached(xi.href, dirname(parentFile));
     if (!resolved.path) {
+      if (this.shouldSuppressMissingInclude(xi.href)) {
+        this.suppressedSdkIncludeCount++;
+        return;
+      }
       this.diagnostics.push({
         file: parentFile,
         line: xi.line,
@@ -930,10 +990,17 @@ export class ModIndexer {
   private originOf(path: string): "project" | "sdk" {
     const p = resolve(path).toLowerCase();
     const project = resolve(this.opts.projectDir).toLowerCase();
-    const sdk = resolve(this.opts.sdkDir).toLowerCase();
+    const sdk = this.opts.sdkDir
+      ? resolve(this.opts.sdkDir).toLowerCase()
+      : "";
     if (p.startsWith(project + "\\")) return "project";
     if (sdk && p.startsWith(sdk + "\\")) return "sdk";
     return "project";
+  }
+
+  /** DATA:/ART:/AUDIO: misses are expected when no usable SDK is configured. */
+  private shouldSuppressMissingInclude(source: string): boolean {
+    return this.sdkUnusable && /^(DATA|ART|AUDIO):/i.test(source.trim());
   }
 
   private addAsset(def: AssetDef): void {

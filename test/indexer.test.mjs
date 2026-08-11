@@ -315,6 +315,47 @@ test("trusted rebuilds skip unchanged files; invalidation forces re-reads", asyn
   assert.equal(forced.stats.shallowCacheHits, 2);
 });
 
+test("unvalidated shallow entries are deferred in phase A and stat-verified before phase B", async () => {
+  const documentCache = new DocumentCache();
+  const recordsCache = new IndexRecordsCache();
+  const resolveCache = new IncludeResolveCache();
+  const opts = () => ({
+    projectDir: project,
+    sdkDir: sdk,
+    builtmodsDirs: [join(sdk, "builtmods")],
+    indexSageXml: true,
+    additionalDataSearchPaths: [],
+    walker: new CachedDirectoryWalker(),
+    documentCache,
+    recordsCache,
+    resolveCache,
+    trustUnchanged: true,
+  });
+
+  const first = await new ModIndexer(opts()).build();
+  // Simulate the workspace pre-seeding a disk cache: shallow records are
+  // present but not stat-validated yet.
+  for (const [, entry] of recordsCache.entries()) {
+    if (entry.kind === "shallow") entry.validated = false;
+  }
+
+  let phaseA = null;
+  const second = await new ModIndexer(opts()).build((p) => {
+    phaseA = p;
+  });
+  assert.equal(phaseA.stats.deferredArtFiles, 2, "art files registered, not consumed, in phase A");
+  assert.equal(
+    phaseA.assetsById.has("tank_skn"),
+    false,
+    "art assets are deferred until phase B",
+  );
+  assert.equal(second.stats.shallowScannedFiles, 0, "validated records are not re-scanned");
+  assert.ok(
+    second.assetsById.get("tank_skn")?.some((d) => d.type === "W3DContainer"),
+    "art asset present after phase B",
+  );
+});
+
 test("index stats include candidate/walk phase timings", async () => {
   const idx = await buildIndex();
   assert.equal(typeof idx.stats.candidatesMs, "number");
@@ -359,4 +400,44 @@ test("w3x with a UTF-8 BOM is indexed with correct offsets", async (t) => {
   const def = idx.assetsById.get("tank_bom")?.find((d) => d.type === "W3DContainer");
   assert.ok(def, "BOM-prefixed w3x asset indexed");
   assert.equal(def.line, 3, "id line is correct despite the BOM");
+});
+
+test("indexes the project without an SDK path (project-only mode)", async () => {
+  const idx = await new ModIndexer({
+    projectDir: project,
+    sdkDir: "",
+    builtmodsDirs: [],
+    indexSageXml: true,
+    additionalDataSearchPaths: [],
+    walker: new CachedDirectoryWalker(),
+  }).build();
+
+  assert.ok(idx.complete, "build completes without an SDK");
+  assert.ok(idx.assetsById.has("testtank"), "project assets are still indexed");
+  assert.equal(
+    idx.diagnostics.some(
+      (d) => d.code === "include-not-found" && /DATA:/.test(d.message),
+    ),
+    false,
+    "SDK-only include misses are suppressed in project-only mode",
+  );
+  assert.ok(
+    idx.diagnostics.some((d) => d.code === "sdk-not-configured"),
+    "one summary SDK diagnostic is reported",
+  );
+});
+
+test("missing SDK path does not abort the build", async () => {
+  const missing = join(os.tmpdir(), "ra3modxml-no-such-sdk");
+  const idx = await new ModIndexer({
+    projectDir: project,
+    sdkDir: missing,
+    builtmodsDirs: [],
+    indexSageXml: true,
+    additionalDataSearchPaths: [],
+    walker: new CachedDirectoryWalker(),
+  }).build();
+
+  assert.ok(idx.complete);
+  assert.ok(idx.assetsById.has("testtank"));
 });

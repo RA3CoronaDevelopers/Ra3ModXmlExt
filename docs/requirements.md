@@ -64,6 +64,14 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
    - `<Include>` 目标文件找不到、Include 循环；
    - `$DEFINE` 未定义。
 
+**补充（工作区/项目检测，2026-08-07）**：
+- 项目根不要求工作区精确匹配 `Data/Mod.xml`：从工作区文件夹向上最多 12 层、
+  从打开的 XML 文件向上、以及从“包含多个 mod 的容器文件夹”向下浅扫最多 3 层
+  均可发现项目根（`Data/Mod.xml`、`Data/additionalmaps/mapmetadata_*.xml`、
+  `*.babproj` 任一标记命中即可，大小写不敏感、最近命中优先）。
+- 多项目同时打开时按文档就近选择项目；单项目打开立即建索引，容器/多项目采用
+  惰性索引（活动文档所属项目先建，其他在文档打开或首次请求时建），构建串行执行。
+
 **补充（manifest 解析，支持 include reference 后的补全/导航/诊断）**：
 
 - 当 `Mod.xml`（或其他文件）用 `<Include type="reference" source="DATA:static.xml" />` 引用占位文件时，实际内容来自 SDK `builtmods` 下对应的已编译二进制 manifest（`static.manifest` / `global.manifest` / `audio.manifest`）。
@@ -71,6 +79,11 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
   - **代码补全**：例如 reference 了 `audio.xml` 后，所有音频资产 ID 都能出现在引用型属性（如 `AudioEventRef`）的补全里；
   - **引用导航/悬停**：能定位资产来自哪个 manifest、哪个源文件；
   - **诊断**：能把“引用了 manifest 中的 ID”识别为已解析，而不是误报未解析引用。
+- manifest 的 `sourceFileName`（如 `DATA:globaldata/weapon.xml`）是**原版编译
+  时的源地址**，按 vanilla-only 搜索路径（SDK 根 + `SageXml`）解析，不能用当前
+  mod 的 BAB 顺序解析——否则 mod 同名 DATA 路径会遮蔽 SageXml 源码。ART/AUDIO
+  源码默认不映射（SDK 基本不提供）；SageXml 源缺失时保持 manifest-only，
+  文件存在但 id 被删时降级到文件顶部。
 - manifest 为二进制格式，解析逻辑参考 OpenSAGE `ManifestFile.cs`（用户已在本工作区 `OpenSAGE/` 克隆并切到指定 commit）。关键格式要点：
   - 头部含版本（5/6/7）、端序标志、各缓冲区大小、资产数量；
   - 每个资产条目含 `TypeId`（哈希）、`NameOffset`、`SourceFileNameOffset` 等；
@@ -116,6 +129,9 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
 ## 四、验收标准
 
 - 在 AttachTest / GenEvoTest 上开箱即用（高亮、补全、跳转、诊断）。
+- 打开 mod 的 `Data` 文件夹、`Data` 子文件夹、仅含 mapmetadata 的项目、
+  单个 XML 文件、以及“内部包含多个 mod”的容器文件夹时均能正确发现项目根；
+  多项目打开时各自索引与功能互不串扰。
 - 在 Corona 规模的目录上不卡 UI：索引在后台执行、保存文件后增量更新。
 - 纯解析/索引核心不依赖 VS Code API，可被其他工具复用。
 - 可用 `vsce package` 打出可安装的 `.vsix`。

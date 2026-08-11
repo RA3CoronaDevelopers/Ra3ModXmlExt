@@ -11,8 +11,10 @@
  * Correctness model (layered):
  * - every cached record stores a multi-signal stamp
  *   `{ size, mtimeMs, birthtimeMs, ctimeMs }`;
- * - on load, each file is stat-validated (no content reads); mismatches and
- *   missing files are dropped and re-read during the build;
+ * - a cold start seeds the in-memory cache immediately (`load`) and runs the
+ *   stat pass in the background (`validate`, no content reads); mismatches
+ *   and missing files are invalidated and re-read by a follow-up rebuild
+ *   (the workspace's stale/dirty mechanism converges);
  * - during a session the file watcher invalidates entries precisely;
  * - `ra3modxml.reindex` / `ra3modxml.clearCache` remain the final authority.
  *
@@ -80,6 +82,22 @@ export interface DiskCacheLoadStats {
   validated: number;
   /** Records dropped because the file changed, moved or was deleted. */
   dropped: number;
+  /** Milliseconds spent reading / decompressing / parsing the cache file. */
+  loadMs: number;
+  /** Milliseconds spent stat-validating cached entries. */
+  validateMs: number;
+}
+
+function emptyLoadStats(): DiskCacheLoadStats {
+  return {
+    fileExists: false,
+    keyMatched: false,
+    loaded: 0,
+    validated: 0,
+    dropped: 0,
+    loadMs: 0,
+    validateMs: 0,
+  };
 }
 
 export function diskCacheKey(identity: DiskCacheIdentity): string {
@@ -100,21 +118,18 @@ export class DiskRecordsCache {
   }
 
   /**
-   * Loads and stat-validates the cache. Returns the kept records plus load
-   * statistics; missing/corrupt/key-mismatched caches yield an empty result
-   * instead of an error.
+   * Loads the cache file without validating entries. This is fast (read +
+   * gunzip + JSON parse) so a cold start can seed the in-memory records
+   * cache immediately and let stat validation run in the background.
+   * Missing/corrupt/key-mismatched caches yield an empty result instead of
+   * an error.
    */
-  async loadValidated(): Promise<{
+  async load(): Promise<{
     records: DiskCacheRecord[];
     stats: DiskCacheLoadStats;
   }> {
-    const stats: DiskCacheLoadStats = {
-      fileExists: false,
-      keyMatched: false,
-      loaded: 0,
-      validated: 0,
-      dropped: 0,
-    };
+    const start = Date.now();
+    const stats = emptyLoadStats();
     let raw: DiskCacheFile | null = null;
     try {
       const buf = await readFile(this.filePath);
@@ -132,15 +147,37 @@ export class DiskRecordsCache {
     } catch {
       // Missing or corrupt cache: fall through with an empty result.
     }
+    stats.loadMs = Date.now() - start;
     if (!raw) return { records: [], stats };
 
     stats.keyMatched = true;
     stats.loaded = raw.records.length;
+    return { records: raw.records, stats };
+  }
+
+  /**
+   * Stat-validates cached records. Returns the entries that still match
+   * plus the keys that must be re-read (missing / changed / moved).
+   */
+  async validate(
+    records: DiskCacheRecord[],
+    onProgress?: (validatedCount: number, total: number) => void,
+  ): Promise<{
+    stats: DiskCacheLoadStats;
+    kept: DiskCacheRecord[];
+    invalidKeys: string[];
+  }> {
+    const start = Date.now();
+    const stats = emptyLoadStats();
+    stats.fileExists = true;
+    stats.keyMatched = true;
+    stats.loaded = records.length;
     const kept: DiskCacheRecord[] = [];
-    for (let i = 0; i < raw.records.length; i += VALIDATE_CONCURRENCY) {
-      const chunk = raw.records.slice(i, i + VALIDATE_CONCURRENCY);
+    const invalidKeys: string[] = [];
+    for (let i = 0; i < records.length; i += VALIDATE_CONCURRENCY) {
+      const chunk = records.slice(i, i + VALIDATE_CONCURRENCY);
       const results = await Promise.all(
-        chunk.map(async (rec): Promise<DiskCacheRecord | null> => {
+        chunk.map(async (rec, index): Promise<{ rec: DiskCacheRecord | null; index: number }> => {
           try {
             const s = await stat(rec.key);
             if (
@@ -150,24 +187,50 @@ export class DiskRecordsCache {
               s.birthtimeMs === rec.stat.birthtimeMs &&
               s.ctimeMs === rec.stat.ctimeMs
             ) {
-              return rec;
+              return { rec, index };
             }
           } catch {
             // File missing or inaccessible.
           }
-          return null;
+          return { rec: null, index };
         }),
       );
-      for (const r of results) {
-        if (r) {
-          kept.push(r);
+      for (const { rec, index } of results) {
+        if (rec) {
+          kept.push(rec);
           stats.validated++;
         } else {
           stats.dropped++;
+          invalidKeys.push(chunk[index].key);
         }
       }
+      onProgress?.(stats.validated, records.length);
     }
-    return { records: kept, stats };
+    stats.validateMs = Date.now() - start;
+    return { stats, kept, invalidKeys };
+  }
+
+  /**
+   * Loads and stat-validates the cache (blocking validation). Used by
+   * tests and kept as a convenience; the workspace normally prefers
+   * `load()` + background `validate()`.
+   */
+  async loadValidated(): Promise<{
+    records: DiskCacheRecord[];
+    stats: DiskCacheLoadStats;
+  }> {
+    const { records, stats } = await this.load();
+    if (!records.length) return { records, stats };
+    const validation = await this.validate(records);
+    return {
+      records: validation.kept,
+      stats: {
+        ...stats,
+        validated: validation.stats.validated,
+        dropped: validation.stats.dropped,
+        validateMs: validation.stats.validateMs,
+      },
+    };
   }
 
   /** Writes the current records cache atomically (temp file + rename). */

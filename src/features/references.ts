@@ -134,7 +134,9 @@ export async function sitesToLocations(
 
   const locations: vscode.Location[] = [];
   for (const [file, fileSites] of byFile) {
-    const parsed = await ws.indexer?.readDom(file);
+    const parsed = await (ws.indexerForFile(file) ?? ws.activeIndexer())?.readDom(
+      file,
+    );
     const lineMap = parsed?.lineMap ?? null;
     for (const site of fileSites) {
       if (lineMap) {
@@ -179,7 +181,7 @@ export async function findReferenceLocations(
   position: vscode.Position,
 ): Promise<vscode.Location[] | null> {
   if (!ws.isRa3Workspace()) return null;
-  scheduleRebuildIfRecordsDesync(ws, document);
+  scheduleRebuildIfRecordsDesync(ws.recordsSyncSurfaceFor(document), document);
   const scope = await ws.getScope(document);
   const idx = scope.merged;
   if (!idx) return null;
@@ -207,16 +209,24 @@ export async function showReferencesForDef(
   ws: ModWorkspace,
   args: ShowReferencesArgs,
 ): Promise<void> {
-  const idx = ws.index;
+  const doc = vscode.workspace.textDocuments.find(
+    (d) => d.uri.toString() === args.uri.toString(),
+  );
+  if (!doc) return;
+  let idx: ModIndex | null = null;
+  try {
+    idx = (await ws.getCodeLensScope(doc)).merged;
+  } catch {
+    return;
+  }
   if (!idx) return;
-  const def: AssetDef = {
-    type: args.type,
+  // Same definition union as the lens count / Find All References.
+  const defs = definitionsForReference(idx, {
     id: args.id,
-    file: args.file,
-    line: args.line,
-    origin: "project",
-  };
-  const sites = referenceSitesForDef(idx, def);
+    refType: null,
+    selfType: null,
+  });
+  const sites = collectReferenceSites(idx, defs);
   const locations = await sitesToLocations(ws, sites);
   await vscode.commands.executeCommand(
     "editor.action.showReferences",

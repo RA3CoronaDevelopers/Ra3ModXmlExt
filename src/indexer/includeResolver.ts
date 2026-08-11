@@ -44,36 +44,63 @@ export function buildSearchPaths(
 ): SearchPaths {
   const modParentPath = resolve(projectDir, "..");
   const modGranParent = resolve(modParentPath, "..");
+  const sdk = sdkDir && sdkDir.trim() ? resolve(sdkDir) : "";
+  const sdkItems = (items: string[]): string[] => (sdk ? items : []);
   return {
     DATA: [
-      sdkDir,
+      ...sdkItems([sdk]),
       modGranParent,
       join(projectDir, "Data"),
-      join(sdkDir, "Mods"),
+      ...sdkItems([join(sdk, "Mods")]),
       modParentPath,
-      join(sdkDir, "SageXml"),
+      ...sdkItems([join(sdk, "SageXml")]),
       ...(extra?.DATA ?? []),
     ],
     ART: [
-      sdkDir,
+      ...sdkItems([sdk]),
       modGranParent,
       join(projectDir, "Art1"),
       join(projectDir, "Art"),
-      join(sdkDir, "Mods"),
+      ...sdkItems([join(sdk, "Mods")]),
       modParentPath,
-      join(sdkDir, "Art"),
+      ...sdkItems([join(sdk, "Art")]),
       ...(extra?.ART ?? []),
     ],
     AUDIO: [
-      sdkDir,
+      ...sdkItems([sdk]),
       modGranParent,
       join(projectDir, "Audio1"),
       join(projectDir, "Audio"),
-      join(sdkDir, "Mods"),
+      ...sdkItems([join(sdk, "Mods")]),
       modParentPath,
-      join(sdkDir, "Audio"),
+      ...sdkItems([join(sdk, "Audio")]),
       ...(extra?.AUDIO ?? []),
     ],
+  };
+}
+
+/**
+ * Search paths used to resolve a `manifestSource` back to the original
+ * vanilla SDK source file.
+ *
+ * `manifestSource` records where the asset came from when the vanilla
+ * manifest was compiled; it is not an Include path that should be resolved
+ * with the current mod's BAB search order. If a mod shadows the same DATA:
+ * path (for example `Data/globaldata/weapon.xml` exists in both the mod and
+ * `SageXml`), the manifest definition must still point at the SageXml file.
+ *
+ * DATA/ART/AUDIO are resolved against the SDK root first (matching the
+ * vanilla BAB `/data "/art" /audio` order), then against the corresponding
+ * SDK source folder. ART/AUDIO source files are not shipped for most assets,
+ * so those resolutions usually return null and callers fall back to
+ * manifest-only behavior.
+ */
+export function buildVanillaSearchPaths(sdkDir: string): SearchPaths {
+  const sdk = sdkDir && sdkDir.trim() ? resolve(sdkDir) : "";
+  return {
+    DATA: sdk ? [sdk, join(sdk, "SageXml")] : [],
+    ART: sdk ? [sdk, join(sdk, "Art")] : [],
+    AUDIO: sdk ? [sdk, join(sdk, "Audio")] : [],
   };
 }
 

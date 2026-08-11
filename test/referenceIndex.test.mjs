@@ -2,7 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { ModIndexer } from "../out/indexer/indexer.js";
 import { CachedDirectoryWalker } from "../out/indexer/fileScanner.js";
@@ -152,47 +158,61 @@ test("records extracted from XML resolve through the reference index", () => {
 });
 
 test("referenceSitesForDefinition unions manifest-source sites onto the SageXml source file", () => {
-  const sourceFile = join(project, "Data", "Includes", "Units.xml");
-  const manifestDef = {
-    type: "GameObject",
-    id: "Tank",
-    file: join(sdk, "builtmods", "static.manifest"),
-    line: 0,
-    origin: "manifest",
-    manifestSource: "DATA:Includes/Units.xml",
-  };
-  const site = {
-    file: "C:/mod/ref.xml",
-    line: 3,
-    start: 10,
-    end: 14,
-    kind: "attr",
-  };
-  const idx = {
-    assets: new Map([["GameObject", new Map([["tank", [manifestDef]]])]]),
-    assetsById: new Map([["tank", [manifestDef]]]),
-    references: new Map([[assetDefKey(manifestDef), [site]]]),
-    projectDir: project,
-    sdkDir: sdk,
-  };
+  const tmp = mkdtempSync(join(tmpdir(), "ra3-refindex-"));
+  try {
+    const sdkDir = join(tmp, "sdk");
+    const projectDir = join(tmp, "project");
+    const sourceFile = join(sdkDir, "SageXml", "Includes", "Units.xml");
+    const shadowFile = join(projectDir, "Data", "Includes", "Units.xml");
+    mkdirSync(dirname(sourceFile), { recursive: true });
+    mkdirSync(dirname(shadowFile), { recursive: true });
+    writeFileSync(sourceFile, "<AssetDeclaration/>", "utf8");
+    writeFileSync(shadowFile, "<AssetDeclaration/>", "utf8");
 
-  const sites = referenceSitesForDefinition(idx, {
-    type: "GameObject",
-    id: "Tank",
-    file: sourceFile,
-    line: 4,
-  });
-  assert.equal(sites.length, 1);
-  assert.equal(sites[0].file, "C:/mod/ref.xml");
+    const manifestDef = {
+      type: "GameObject",
+      id: "Tank",
+      file: join(sdkDir, "builtmods", "static.manifest"),
+      line: 0,
+      origin: "manifest",
+      manifestSource: "DATA:Includes/Units.xml",
+    };
+    const site = {
+      file: "C:/mod/ref.xml",
+      line: 3,
+      start: 10,
+      end: 14,
+      kind: "attr",
+    };
+    const idx = {
+      assets: new Map([["GameObject", new Map([["tank", [manifestDef]]])]]),
+      assetsById: new Map([["tank", [manifestDef]]]),
+      references: new Map([[assetDefKey(manifestDef), [site]]]),
+      projectDir,
+      sdkDir,
+    };
 
-  // A different file does not inherit the manifest definition's sites.
-  const other = referenceSitesForDefinition(idx, {
-    type: "GameObject",
-    id: "Tank",
-    file: "C:/mod/elsewhere.xml",
-    line: 4,
-  });
-  assert.equal(other.length, 0);
+    const sites = referenceSitesForDefinition(idx, {
+      type: "GameObject",
+      id: "Tank",
+      file: sourceFile,
+      line: 4,
+    });
+    assert.equal(sites.length, 1);
+    assert.equal(sites[0].file, "C:/mod/ref.xml");
+
+    // The mod file shadowing the same DATA: path must NOT inherit the
+    // manifest definition's sites; manifestSource maps to SageXml only.
+    const other = referenceSitesForDefinition(idx, {
+      type: "GameObject",
+      id: "Tank",
+      file: shadowFile,
+      line: 4,
+    });
+    assert.equal(other.length, 0);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("the minimod indexer publishes a semantic reverse reference index", async () => {

@@ -261,7 +261,7 @@ class OverlayBuilder {
   private originOf(path: string): "project" | "sdk" | "manifest" {
     const p = resolve(path).toLowerCase();
     const project = resolve(this.ctx.projectDir).toLowerCase();
-    const sdk = resolve(this.ctx.sdkDir).toLowerCase();
+    const sdk = this.ctx.sdkDir ? resolve(this.ctx.sdkDir).toLowerCase() : "";
     if (p.startsWith(project + "\\")) return "project";
     if (sdk && p.startsWith(sdk + "\\")) return "sdk";
     return "project";

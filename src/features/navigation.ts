@@ -4,6 +4,7 @@ import { findElementAt, parseXml, textContentTokenAt } from "../language/xmlPars
 import { resolveElementType } from "../language/typeContext";
 import {
   buildSearchPaths,
+  buildVanillaSearchPaths,
   resolveSource,
   type SearchPaths,
 } from "../indexer/includeResolver";
@@ -71,7 +72,9 @@ export class Ra3DefinitionProvider implements vscode.DefinitionProvider {
       (el.name === "Include" && nameLower === "source") ||
       (el.name === "include" && nameLower === "href")
     ) {
-      const searchPaths = idx ? searchPathsFor(idx) : this.ws.searchPaths();
+      const searchPaths = idx
+        ? searchPathsFor(idx)
+        : this.ws.searchPaths(document);
       const resolved = searchPaths
         ? resolveSource(value, dirname(document.uri.fsPath), searchPaths).path
         : null;
@@ -178,11 +181,23 @@ async function assetDefLocation(
   }
   if (def.origin === "manifest") {
     const src = def.manifestSource;
-    if (src?.toUpperCase().startsWith("DATA:")) {
-      const resolved = resolveSource(src, null, searchPathsFor(idx)).path;
+    if (src) {
+      // manifestSource is a path recorded by the vanilla build, not an
+      // Include path in the current mod. Resolve it with SDK-only search
+      // paths so a mod file shadowing the same DATA: path cannot hijack the
+      // jump (e.g. mod Data/globaldata/weapon.xml vs SageXml/...). If the SDK
+      // source is missing (user removed/renamed a SageXml file), keep the
+      // definition manifest-only instead of opening the wrong file.
+      const resolved = resolveSource(
+        src,
+        null,
+        buildVanillaSearchPaths(idx.sdkDir),
+      ).path;
       if (resolved) {
         // The recorded source file is XML (e.g. SageXml) when available:
-        // jump to the precise definition inside it, not just the file.
+        // jump to the precise definition inside it. If the file was modified
+        // and no longer contains the id, fall back to opening the file at the
+        // top rather than inventing a precise location.
         const precise = await locationInDocument(ws, resolved, def.id);
         return precise ?? new vscode.Location(vscode.Uri.file(resolved), new vscode.Position(0, 0));
       }
@@ -305,8 +320,10 @@ export class Ra3DocumentLinkProvider implements vscode.DocumentLinkProvider {
     _token: vscode.CancellationToken,
   ): Promise<vscode.DocumentLink[]> {
     if (!this.ws.isRa3Workspace()) return [];
-    const idx = this.ws.index;
-    const searchPaths = idx ? searchPathsFor(idx) : this.ws.searchPaths();
+    const idx = this.ws.indexForDocument(document) ?? this.ws.activeIndex();
+      const searchPaths = idx
+        ? searchPathsFor(idx)
+        : this.ws.searchPaths(document);
     if (!searchPaths) return [];
     const text = document.getText();
     const doc = parseXml(text);

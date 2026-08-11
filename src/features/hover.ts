@@ -155,7 +155,7 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     ) {
       const searchPaths = idx
         ? buildSearchPaths(idx.sdkDir, idx.projectDir)
-        : this.ws.searchPaths();
+        : this.ws.searchPaths(document);
       const resolved = searchPaths
         ? resolveSource(
             value,

@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 
 // Minimal vscode shim for hover / definition / diagnostics providers.
 const CompletionItemKind = {};
@@ -37,7 +40,7 @@ class Hover {
 class Location {
   constructor(uri, range) {
     this.uri = uri;
-    this.range = range;
+    this.range = range instanceof Position ? new Range(range, range) : range;
   }
 }
 class Diagnostic {
@@ -234,6 +237,176 @@ test("Ctrl+click on simple-content text jumps to the definition", async () => {
       end: makeDocument(TEXT).positionAt(defEnd),
     },
   );
+});
+
+test("Ctrl+click on a manifest definition maps to SageXml even when the mod shadows the DATA path", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ra3-nav-manifest-"));
+  try {
+    const sdkDir = join(tmp, "sdk");
+    const projectDir = join(tmp, "project");
+    const sageFile = join(sdkDir, "SageXml", "globaldata", "weapon.xml");
+    const modFile = join(projectDir, "Data", "globaldata", "weapon.xml");
+    mkdirSync(dirname(sageFile), { recursive: true });
+    mkdirSync(dirname(modFile), { recursive: true });
+    writeFileSync(
+      sageFile,
+      '<AssetDeclaration xmlns="uri:ea.com:eala:asset"><GameObject id="AlliedCommandoDesertEagles"/></AssetDeclaration>',
+      "utf8",
+    );
+    writeFileSync(
+      modFile,
+      '<AssetDeclaration xmlns="uri:ea.com:eala:asset"><GameObject id="ModOnly"/></AssetDeclaration>',
+      "utf8",
+    );
+
+    const manifestDef = {
+      type: "GameObject",
+      id: "AlliedCommandoDesertEagles",
+      file: join(sdkDir, "builtmods", "static.manifest"),
+      line: 0,
+      origin: "manifest",
+      manifestSource: "DATA:globaldata/weapon.xml",
+    };
+    const idx = makeIdx([manifestDef]);
+    idx.projectDir = projectDir;
+    idx.sdkDir = sdkDir;
+    const text =
+      '<AssetDeclaration xmlns="uri:ea.com:eala:asset">\n' +
+      '  <GameObject id="MyUnit" inheritFrom="AlliedCommandoDesertEagles"/>\n' +
+      "</AssetDeclaration>";
+    const scope = await makeScope(text, idx);
+    const provider = new Ra3DefinitionProvider({
+      isRa3Workspace: () => true,
+      getScope: async () => scope,
+      settings: { definitionMode: "all" },
+      indexer: { readDom: async () => null },
+    });
+
+    const line = text.split("\n")[1];
+    const pos = new Position(
+      1,
+      line.indexOf("AlliedCommandoDesertEagles") + 3,
+    );
+    const locations = await provider.provideDefinition(makeDocument(text), pos, {});
+    assert.ok(locations && locations.length === 1, "manifest definition resolves");
+    assert.equal(
+      locations[0].uri.fsPath,
+      sageFile,
+      "manifest source must resolve to SageXml, not the mod shadow file",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("manifest definition stays manifest-only when the SageXml source is missing", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ra3-nav-manifest-missing-"));
+  try {
+    const sdkDir = join(tmp, "sdk");
+    const projectDir = join(tmp, "project");
+    const modFile = join(projectDir, "Data", "globaldata", "weapon.xml");
+    mkdirSync(dirname(modFile), { recursive: true });
+    writeFileSync(
+      modFile,
+      '<AssetDeclaration xmlns="uri:ea.com:eala:asset"><GameObject id="AlliedCommandoDesertEagles"/></AssetDeclaration>',
+      "utf8",
+    );
+
+    const manifestDef = {
+      type: "GameObject",
+      id: "AlliedCommandoDesertEagles",
+      file: join(sdkDir, "builtmods", "static.manifest"),
+      line: 0,
+      origin: "manifest",
+      manifestSource: "DATA:globaldata/weapon.xml",
+    };
+    const idx = makeIdx([manifestDef]);
+    idx.projectDir = projectDir;
+    idx.sdkDir = sdkDir;
+    const text =
+      '<AssetDeclaration xmlns="uri:ea.com:eala:asset">\n' +
+      '  <GameObject id="MyUnit" inheritFrom="AlliedCommandoDesertEagles"/>\n' +
+      "</AssetDeclaration>";
+    const scope = await makeScope(text, idx);
+    const provider = new Ra3DefinitionProvider({
+      isRa3Workspace: () => true,
+      getScope: async () => scope,
+      settings: { definitionMode: "all" },
+      indexer: { readDom: async () => null },
+    });
+
+    const line = text.split("\n")[1];
+    const pos = new Position(
+      1,
+      line.indexOf("AlliedCommandoDesertEagles") + 3,
+    );
+    const locations = await provider.provideDefinition(makeDocument(text), pos, {});
+    assert.equal(
+      locations,
+      null,
+      "missing vanilla source must not fall back to the mod shadow file",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("manifest definition opens the SageXml file at the top when the id is no longer there", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ra3-nav-manifest-stale-"));
+  try {
+    const sdkDir = join(tmp, "sdk");
+    const projectDir = join(tmp, "project");
+    const sageFile = join(sdkDir, "SageXml", "globaldata", "weapon.xml");
+    const modFile = join(projectDir, "Data", "globaldata", "weapon.xml");
+    mkdirSync(dirname(sageFile), { recursive: true });
+    mkdirSync(dirname(modFile), { recursive: true });
+    writeFileSync(
+      sageFile,
+      '<AssetDeclaration xmlns="uri:ea.com:eala:asset"/>',
+      "utf8",
+    );
+    writeFileSync(
+      modFile,
+      '<AssetDeclaration xmlns="uri:ea.com:eala:asset"><GameObject id="AlliedCommandoDesertEagles"/></AssetDeclaration>',
+      "utf8",
+    );
+
+    const manifestDef = {
+      type: "GameObject",
+      id: "AlliedCommandoDesertEagles",
+      file: join(sdkDir, "builtmods", "static.manifest"),
+      line: 0,
+      origin: "manifest",
+      manifestSource: "DATA:globaldata/weapon.xml",
+    };
+    const idx = makeIdx([manifestDef]);
+    idx.projectDir = projectDir;
+    idx.sdkDir = sdkDir;
+    const text =
+      '<AssetDeclaration xmlns="uri:ea.com:eala:asset">\n' +
+      '  <GameObject id="MyUnit" inheritFrom="AlliedCommandoDesertEagles"/>\n' +
+      "</AssetDeclaration>";
+    const scope = await makeScope(text, idx);
+    const provider = new Ra3DefinitionProvider({
+      isRa3Workspace: () => true,
+      getScope: async () => scope,
+      settings: { definitionMode: "all" },
+      indexer: { readDom: async () => null },
+    });
+
+    const line = text.split("\n")[1];
+    const pos = new Position(
+      1,
+      line.indexOf("AlliedCommandoDesertEagles") + 3,
+    );
+    const locations = await provider.provideDefinition(makeDocument(text), pos, {});
+    assert.ok(locations && locations.length === 1);
+    assert.equal(locations[0].uri.fsPath, sageFile);
+    assert.equal(locations[0].range.start.line, 0);
+    assert.equal(locations[0].range.start.character, 0);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("diagnostics report unresolved typed content references only", async () => {

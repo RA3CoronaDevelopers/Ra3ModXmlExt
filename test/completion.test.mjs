@@ -416,6 +416,64 @@ test("whitespace used to trigger the popup is consumed on newline insert", async
   assert.equal(count.range.end.character, pos.character);
 });
 
+test("attribute completion in the middle of a one-per-line start tag does not add a newline", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      C\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE">`;
+  const pos = new Position(4, 7);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const count = items.find((i) => i.label === "Count");
+  assert.ok(count);
+  // The attribute is already on its own line; inserting another newline
+  // would leave a blank line. Only the partial name is replaced.
+  assert.equal(count.insertText.value, '      Count="1"');
+  assert.equal(count.range.start.character, 0);
+  assert.equal(count.range.end.character, 7);
+});
+
+test("attribute completion before the first attribute on a new line does not add a newline", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject\n` +
+    `      C\n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE">`;
+  const pos = new Position(3, 7);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const count = items.find((i) => i.label === "Count");
+  assert.ok(count);
+  assert.equal(count.insertText.value, '      Count="1"');
+  assert.equal(count.range.start.character, 0);
+  assert.equal(count.range.end.character, 7);
+});
+
+test("attribute completion right after the element name still wraps in one-per-line files", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ObjectCreationList id="OCL_CrateSpawn">\n` +
+    `    <CreateObject \n` +
+    `      Options="IGNORE_ALL_OBJECTS"\n` +
+    `      Disposition="RANDOM_FORCE RELATIVE_ANGLE">`;
+  const line3 = text.split("\n")[3];
+  const pos = new Position(3, line3.length);
+
+  const items = await provider.provideCompletionItems(makeDocument(text), pos, token);
+  const count = items.find((i) => i.label === "Count");
+  assert.ok(count);
+  // The new attribute would be the first one on the element-name line, so a
+  // one-per-line file still wraps it onto its own line.
+  assert.equal(count.insertText.value, '\nCount="1"');
+  assert.equal(count.range.start.character, pos.character);
+  assert.equal(count.range.end.character, pos.character);
+});
+
 test("scalar attributes get typed default values, suggestion attributes keep $1", async () => {
   const text =
     `<AssetDeclaration>\n` +
@@ -858,4 +916,62 @@ test("current-file local overlay assets survive the global 400 cap", async () =>
   assert.equal(Array.isArray(result), false);
   assert.equal(result.isIncomplete, true);
   assert.ok(result.items.some((i) => i.label === "CrateDebris_01"));
+});
+
+test("asset-id completion shows one entry per id across local/global/manifest definitions", async () => {
+  const projectDef = {
+    type: "WeaponTemplate",
+    id: "AlliedCommandoDesertEaglesWarhead",
+    file: "C:/mod/Data/GlobalData/Weapon/Weapon_Allied.xml",
+    line: 10,
+    origin: "project",
+  };
+  const unsavedLocalDef = {
+    type: "WeaponTemplate",
+    id: "AlliedCommandoDesertEaglesWarhead",
+    file: "C:/mod/Data/GlobalData/Weapon/Weapon_Allied.xml",
+    line: 14,
+    origin: "project",
+    stream: "local",
+  };
+  const manifestDef = {
+    type: "WeaponTemplate",
+    id: "AlliedCommandoDesertEaglesWarhead",
+    file: "C:/sdk/builtmods/static.manifest",
+    line: 0,
+    origin: "manifest",
+    manifestSource: "DATA:static.xml",
+  };
+  const idKey = "alliedcommandodeserteagleswarhead";
+  const idx = {
+    assets: new Map([
+      ["WeaponTemplate", new Map([[idKey, [projectDef, manifestDef]]])],
+    ]),
+    assetsById: new Map([[idKey, [projectDef, manifestDef]]]),
+    local: {
+      assets: new Map([["WeaponTemplate", new Map([[idKey, [unsavedLocalDef]]])]]),
+      assetsById: new Map([[idKey, [unsavedLocalDef]]]),
+      defines: new Map(),
+    },
+  };
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <ProjectileNugget WarheadTemplate="A">\n` +
+    `  </ProjectileNugget>\n` +
+    `</AssetDeclaration>`;
+  const line = text.split("\n")[1];
+  const pos = new Position(1, line.indexOf('"A') + 2);
+
+  const result = await makeProvider(idx).provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const items = listItems(result);
+  const matches = items.filter((i) => i.label === "AlliedCommandoDesertEaglesWarhead");
+  assert.equal(matches.length, 1, "same id from local/global/manifest is offered once");
+  assert.ok(
+    matches[0].documentation.value.includes("Also defined"),
+    "additional definitions are listed in the item documentation",
+  );
 });

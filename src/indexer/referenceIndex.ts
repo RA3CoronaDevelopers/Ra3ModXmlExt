@@ -18,7 +18,7 @@ import {
   isReferenceTargetType,
   type ReferenceLookup,
 } from "./refs";
-import { buildSearchPaths, resolveSource } from "./includeResolver";
+import { buildVanillaSearchPaths, resolveSource } from "./includeResolver";
 import { normKey, recordsHash } from "./caches";
 import { LineMap, parseXml } from "../language/xmlParser";
 import type { AssetDef, ModIndex, ReferenceSite } from "./types";
@@ -90,10 +90,13 @@ function normFileKey(path: string): string {
  *
  * Besides the definition's own reverse-index bucket, this unions the sites
  * of manifest definitions that map back to the same XML source file via
- * `manifestSource`. A manifest asset with a resolvable SageXml source is
- * semantically the same asset as that XML definition, so references to it
- * should show up on the source file's CodeLens too (Find All References
- * already sees them because it unions every same-id/type definition).
+ * `manifestSource`. `manifestSource` is resolved with the SDK-only search
+ * paths (not the current mod's BAB order), so a mod file shadowing the same
+ * DATA: path is never mistaken for the vanilla source. A manifest asset with
+ * a resolvable SageXml source is semantically the same asset as that XML
+ * definition, so references to it should show up on the source file's
+ * CodeLens too (Find All References already sees them because it unions
+ * every same-id/type definition).
  */
 export function referenceSitesForDefinition(
   idx: ModIndex,
@@ -104,13 +107,13 @@ export function referenceSitesForDefinition(
   if (!byId?.length) return sites;
 
   const defFile = normFileKey(def.file);
-  const searchPaths = buildSearchPaths(idx.sdkDir, idx.projectDir);
+  const vanillaPaths = buildVanillaSearchPaths(idx.sdkDir);
   const seen = new Set(
     sites.map((s) => `${s.file}\u0000${s.start}\u0000${s.end}\u0000${s.kind}`),
   );
   for (const other of byId) {
     if (other.origin !== "manifest" || !other.manifestSource) continue;
-    const resolved = resolveSource(other.manifestSource, null, searchPaths).path;
+    const resolved = resolveSource(other.manifestSource, null, vanillaPaths).path;
     if (!resolved || normFileKey(resolved) !== defFile) continue;
     for (const site of referenceSitesForDef(idx, other)) {
       const key = `${site.file}\u0000${site.start}\u0000${site.end}\u0000${site.kind}`;
