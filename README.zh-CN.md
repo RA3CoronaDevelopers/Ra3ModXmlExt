@@ -14,6 +14,8 @@
 
 它理解 RA3 Mod SDK 的 XML schema、资产类型、引用、include 以及原版游戏数据——编辑大型模组的体验会更接近真正的编程语言。
 
+源码：[GitHub 镜像](https://github.com/RA3CoronaDevelopers/Ra3ModXmlExt.git) · [Gitea](https://git.ra3battle.cn/RA3CoronaDevelopers/Ra3ModXmlExt)
+
 <table>
   <tr>
     <td align="center">

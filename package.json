@@ -2,15 +2,25 @@
   "name": "ra3-mod-xml",
   "displayName": "%ra3modxml.displayName%",
   "description": "%ra3modxml.description%",
-  "version": "0.1.24",
+  "version": "0.1.25",
   "publisher": "lanyi",
   "license": "SEE LICENSE IN LICENSE",
   "icon": "images/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://git.ra3battle.cn/RA3CoronaDevelopers/Ra3ModXmlExt.git"
+    "url": "https://github.com/RA3CoronaDevelopers/Ra3ModXmlExt.git"
   },
-  "homepage": "https://git.ra3battle.cn/RA3CoronaDevelopers/Ra3ModXmlExt",
+  "homepage": "https://github.com/RA3CoronaDevelopers/Ra3ModXmlExt",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "The workspace-defined SDK path and additional DATA: search paths are ignored until the workspace is trusted.",
+      "restrictedConfigurations": [
+        "ra3modxml.sdkPath",
+        "ra3modxml.additionalDataSearchPaths"
+      ]
+    }
+  },
   "l10n": "./l10n",
   "engines": {
     "vscode": "^1.85.0"

@@ -14,6 +14,8 @@ A VS Code extension that brings **IntelliSense, navigation, reference tracking, 
 
 It understands the RA3 Mod SDK's XML schema, asset types, references, includes, and vanilla game data — so editing a large mod feels much more like working with a real programming language.
 
+Source code: [GitHub mirror](https://github.com/RA3CoronaDevelopers/Ra3ModXmlExt.git) · [Gitea](https://git.ra3battle.cn/RA3CoronaDevelopers/Ra3ModXmlExt)
+
 <table>
   <tr>
     <td align="center">

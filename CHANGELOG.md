@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.25 — 2026-08-11
+
+### Changed
+
+- Repository and homepage links now point to the GitHub mirror; README links to both GitHub and Gitea.
+- Extension now activates in untrusted (Restricted Mode) workspaces; workspace-defined `ra3modxml.sdkPath` and `ra3modxml.additionalDataSearchPaths` are ignored until the workspace is trusted.
+
 ## 0.1.24 — 2026-08-11
 
 ### Fixed
