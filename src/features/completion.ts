@@ -8,7 +8,7 @@ import {
 } from "../language/context";
 import { resolveElementType } from "../language/typeContext";
 import * as model from "../model/schemaModel";
-import type { AttributeInfo, SimpleTypeInfo } from "../model/schemaModel";
+import type { AttributeInfo, ContentTypeInfo } from "../model/schemaModel";
 import { isLocalReferenceAttribute } from "../indexer/refs";
 import {
   findContainingGameObject,
@@ -84,6 +84,13 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       item.documentation = docText ? new vscode.MarkdownString(docText) : undefined;
       item.detail = type ? t("RA3 XML · {0}", type) : t("RA3 XML");
       item.insertText = this.elementSnippet(child.name, type, ctx.element == null);
+      const contentInfo = type ? model.contentInfoOfType(type) : undefined;
+      if (contentInfo && this.simpleContentValueKind(contentInfo)) {
+        item.command = {
+          command: "editor.action.triggerSuggest",
+          title: t("Suggest content value"),
+        };
+      }
       items.push(item);
     }
     return items;
@@ -120,13 +127,14 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     if (model.isTopLevelElement(name)) {
       return new vscode.SnippetString(`${open}${name} id="$1">\n\t$0\n</${name}>`);
     }
-    const info = type ? model.typeInfo(type) : undefined;
-    // Simple types hold text content (asset id / enum / define / string), so
-    // they need an explicit closing tag and a value placeholder instead of a
-    // self-closing tag that can never contain a value.
-    if (info?.kind === "simple") {
+    // Simple types and simpleContent complex types hold text content (asset
+    // id / enum / define / string), so they need an explicit closing tag and
+    // a value placeholder instead of a self-closing tag that can never
+    // contain a value.
+    if (type && model.contentInfoOfType(type)) {
       return new vscode.SnippetString(`${open}${name}>$1</${name}>`);
     }
+    const info = type ? model.typeInfo(type) : undefined;
     const hasChildren = info?.kind === "complex" && info.children.length > 0;
     if (hasChildren) {
       return new vscode.SnippetString(`${open}${name}>\n\t$0\n</${name}>`);
@@ -338,6 +346,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
 
     // inheritFrom: same element type first, then everything.
     if (attrName === "inheritfrom") {
+      if (!model.isAssetType(elType)) return [];
       if (!idx) return [];
       return this.assetIdItems(idx, el.name, null, prefix, make);
     }
@@ -653,12 +662,14 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     const el = ctx.element;
     if (!el) return [];
     const elType = resolveElementType(el);
-    const info = elType ? model.typeInfo(elType) : undefined;
+    const info = elType ? model.contentInfoOfType(elType) : undefined;
 
-    // Simple-content element: the text between the tags is the value itself
-    // (e.g. <CreateObject>CrateDebris_01</CreateObject>), so offer value
-    // completions (asset ids / enums / defines) instead of child elements.
-    if (info?.kind === "simple") {
+    // Simple-content element (simple type or simpleContent complex type):
+    // the text between the tags is the value itself (e.g.
+    // <CreateObject>CrateDebris_01</CreateObject> or
+    // <Sound>AudioFile</Sound>), so offer value completions (asset ids /
+    // enums / defines) instead of child elements.
+    if (info) {
       return this.simpleContentItems(el, elType, info, document, position, idx);
     }
 
@@ -668,7 +679,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
   private simpleContentItems(
     el: XmlElement,
     elType: string | null,
-    info: SimpleTypeInfo,
+    info: ContentTypeInfo,
     document: vscode.TextDocument,
     position: vscode.Position,
     idx: ModIndex | null,
@@ -756,7 +767,8 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       item.detail = type ? t("RA3 XML · {0}", type) : t("RA3 XML");
       const doc = child.doc || (info?.kind === "complex" ? info.doc : "");
       if (doc) item.documentation = new vscode.MarkdownString(doc);
-      if (info?.kind === "simple" && this.simpleContentValueKind(info)) {
+      const contentInfo = type ? model.contentInfoOfType(type) : undefined;
+      if (contentInfo && this.simpleContentValueKind(contentInfo)) {
         item.command = {
           command: "editor.action.triggerSuggest",
           title: t("Suggest content value"),
@@ -767,7 +779,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     return items;
   }
 
-  private simpleContentValueKind(info: SimpleTypeInfo): boolean {
+  private simpleContentValueKind(info: ContentTypeInfo): boolean {
     return (
       info.refType != null ||
       info.enumValues.length > 0 ||

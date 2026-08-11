@@ -11,6 +11,8 @@ debug.log
 docs/**
 OpenSAGE/**
 test/**
+images/**
+!images/icon.png
 **/*.map
 tsconfig.json
 esbuild.mjs

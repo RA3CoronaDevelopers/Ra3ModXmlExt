@@ -1,4 +1,4 @@
-import { childTypeOf, elementTypeName } from "../model/schemaModel";
+import { childTypeOf, elementTypeName, topLevelElementType } from "../model/schemaModel";
 import type { XmlElement } from "./xmlParser";
 
 /**
@@ -9,7 +9,12 @@ import type { XmlElement } from "./xmlParser";
  */
 export function resolveElementType(el: XmlElement): string | null {
   if (!el.parent) {
-    return elementTypeName(el.name);
+    // A document root (fragment or full AssetDeclaration) has no parent to
+    // provide context. When the root is a top-level asset whose name also
+    // appears as a nested child type (EvaEvent, UpgradeTemplate, ...),
+    // prefer the AssetDeclaration declaration over the global single-map
+    // fallback.
+    return topLevelElementType(el.name) ?? elementTypeName(el.name);
   }
   const parentType = resolveElementType(el.parent);
   return childTypeOf(parentType, el.name) ?? elementTypeName(el.name);

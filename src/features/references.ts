@@ -14,7 +14,7 @@ import {
   textContentTokenAt,
 } from "../language/xmlParser";
 import { resolveElementType } from "../language/typeContext";
-import { attributesOfType, typeInfo } from "../model/schemaModel";
+import { attributesOfType, contentInfoOfType } from "../model/schemaModel";
 import {
   filterAndScoreDefs,
   isReferenceAttributeOfType,
@@ -76,10 +76,10 @@ export function referenceContextAt(
   if (elType && isReferenceContentType(elType)) {
     const token = textContentTokenAt(text, el, offset);
     if (token && !token.value.startsWith("$") && !token.value.startsWith("=")) {
-      const info = typeInfo(elType);
+      const info = contentInfoOfType(elType);
       return {
         id: token.value,
-        refType: info?.kind === "simple" ? info.refType : null,
+        refType: info?.refType ?? null,
         selfType: null,
       };
     }

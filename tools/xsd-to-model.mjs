@@ -368,8 +368,13 @@ function expandComplexType(name, chain = []) {
   const node = complexTypes.get(name);
   if (!node) return null;
 
-  const extension = node?.complexContent?.extension;
-  const baseName = normalizeTypeName(extension?.["@_base"] ?? node?.simpleContent?.extension?.["@_base"]);
+  // Both `complexContent/extension` and `simpleContent/extension` contribute
+  // attributes. simpleContent types (AudioFileRefWithWeight,
+  // MultisoundSubsoundRef, ...) were previously losing all of theirs because
+  // only the complexContent branch was read.
+  const extension =
+    node?.complexContent?.extension ?? node?.simpleContent?.extension ?? null;
+  const baseName = normalizeTypeName(extension?.["@_base"] ?? null);
   const base = baseName ? expandComplexType(baseName, [...chain, name]) : null;
 
   const ownChildren = collectChildren(extension ?? node);
@@ -389,6 +394,28 @@ function expandComplexType(name, chain = []) {
     base: baseName,
     doc: docOf(node),
   };
+  if (node?.simpleContent) {
+    const simpleBaseName = normalizeTypeName(
+      node.simpleContent.extension?.["@_base"] ?? null,
+    );
+    const baseDesc = simpleBaseName
+      ? resolveTypeDescriptor(simpleBaseName)
+      : null;
+    result.content = {
+      refType:
+        normalizeTypeName(node["@_refType"]) ??
+        normalizeTypeName(baseDesc?.refType) ??
+        null,
+      isRef:
+        node["@_isRef"] === "true" ||
+        node["@_isWeakRef"] === "true" ||
+        baseDesc?.isRef === true,
+      enumValues: baseDesc?.enumValues ?? [],
+      isList: baseDesc?.isList ?? false,
+      allowsDefine: baseDesc?.allowsDefine ?? false,
+      base: simpleBaseName,
+    };
+  }
   expandedTypes.set(name, result);
   return result;
 }

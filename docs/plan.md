@@ -24,7 +24,7 @@
 
 - 共 **821 个 XSD / 1.5 MB**，入口 `CnC3Types.xsd`。
 - 根元素 `AssetDeclaration`：`Tags` / `Includes` / `Defines` + **295 个顶层资产元素**（含内联声明）。
-- 每个元素名对应一个 `complexType`，子元素用 `xs:sequence` / `xs:choice` 定义，属性用 `xs:attribute` 定义；复杂类型通过 `xs:extension` 继承（如 `BaseInheritableAsset` 提供 `inheritFrom`）。
+- 每个元素名对应一个 `complexType`，子元素用 `xs:sequence` / `xs:choice` 定义，属性用 `xs:attribute` 定义；复杂类型通过 `xs:extension` 继承（XSD 中 `BaseInheritableAsset` 提供 `inheritFrom`）。实测 BAB / 原版数据也接受 `FXList`、`AIMicroManagerData`、`AITargetingHeuristic`、`ObjectCreationList` 等 `BaseAssetType` 系资产使用 `inheritFrom`，因此插件把 `inheritFrom` 作为所有资产类型的通用属性处理；“设计上应显示引用计数”的判定仍按 XSD 显式声明的可继承类型，两者分开。
 - `Includes/Ref.xsd` 定义了大量带 `xas:refType="<资产类型>"` 的引用类型（如 `CommandSet` 引用 `LogicCommandSet`）→ 补全/导航按引用类型过滤的依据。
 - `XmlEdit:Default` 提供默认值；`xs:enumeration` 提供枚举值。`xas:refType` 可声明在 simple type 上，也可声明在 `<xs:attribute>` 节点上（模型生成器两者都读、属性级优先）。
 - `Poid`（"Pipeline Object Id"，`xas:isWeakRef="true"`）表示**管线局部标识**：`id` 属性定义元素自身（如 `ModuleData@id` → refType `ModuleData`）；`ModuleId`、`AutoResolveBody`、`SoundRef` 等 Poid 属性引用同一资产/子树内的模块、子对象、材质——它们都不对全局资产索引做 resolved 判定。
@@ -252,16 +252,19 @@ test/
     第一个独占一行的完整属性作为规范缩进，插入换行时顺带吞掉触发补全留下的
     尾随空格；属性名补全改用 `SnippetString`（`$1` 成为真正占位符），并新增
     输出通道调试日志。
-27. **simple-content 元素文本引用（第十六轮，2026-08-04）**：simple type
-    子元素（如 `ObjectCreationList` 内嵌套 `<CreateObject>`，类型
-    `GameObjectWeakRef`）的**标签间文本**就是资产引用。内容区补全现在区分
-    “复杂元素 → 子元素名”与“简单元素 → 值补全”；用户已输入 `<` 时替换范围从
-    `<` 开始，杜绝 `<<`；simple type 元素片段固定为 `<Name>$1</Name>`（可填
-    值）并自动触发值补全。hover / Ctrl 跳转 / 诊断 / Find All References
-    均增加内容 token 分支。只有**带 `xas:refType`** 的 simple 内容按全局引用
-    处理（291 处子元素声明）；无类型 `AssetReference`
-    （`FXShaderConstantTexture@Value`、`RenderSubObjectReference@Mesh` 等
-    真实数据是贴图/子对象名）与 `Poid` 不参与全局解析，避免误报。
+27. **simple-content 元素文本引用（第十六轮，2026-08-04；第三十一轮扩展）**：
+    simple type 子元素（如 `ObjectCreationList` 内嵌套 `<CreateObject>`，类型
+    `GameObjectWeakRef`）以及 simpleContent 复杂类型（如 `<Sound>` →
+    `AudioFileRefWithWeight`、`<Subsound>` → `MultisoundSubsoundRef`）的
+    **标签间文本**就是资产引用。内容区补全现在区分“复杂元素 → 子元素名”与
+    “内容元素 → 值补全”；用户已输入 `<` 时替换范围从 `<` 开始，杜绝 `<<`；
+    内容元素片段固定为 `<Name>$1</Name>`（可填值）并自动触发值补全。hover /
+    Ctrl 跳转 / 诊断 / Find All References 均增加内容 token 分支。只有**带
+    `xas:refType`** 的内容按全局引用处理（291 处 simple type 子元素声明 +
+    `Sound` / `Attack` / `Decay` / `Subsound` 等 simpleContent 复杂类型）；
+    无类型 `AssetReference`（`FXShaderConstantTexture@Value`、
+    `RenderSubObjectReference@Mesh` 等真实数据是贴图/子对象名）与 `Poid`
+    不参与全局解析，避免误报。
     补充：真实文件中 `<` 后还有 `</…>` 时，`findTagEnd` 曾把闭合标签的 `>` 误
     当成残缺开始标签的结束，生成空名/半截名伪元素，补全走 element-name 分支
     导致 `<<`。修复为引号外遇到 `<` 即视为未闭合（行尾恢复），且

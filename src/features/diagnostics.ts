@@ -451,10 +451,11 @@ export class Ra3Diagnostics {
     diags: vscode.Diagnostic[],
     provisional: boolean,
   ): void {
-    // Only simple-content elements carry a text value; complex elements'
-    // "content" is child markup and must not be scanned for value refs.
-    const info = elType ? model.typeInfo(elType) : undefined;
-    if (info?.kind !== "simple") return;
+    // Only simple-content elements carry a text value (simple types and
+    // simpleContent complex types); ordinary complex elements' "content" is
+    // child markup and must not be scanned for value refs.
+    const info = elType ? model.contentInfoOfType(elType) : undefined;
+    if (!info) return;
     if (el.selfClosing || el.closeTagStart < 0) return;
     const text = document.getText();
     const raw = text.slice(el.startTagEnd, el.closeTagStart);

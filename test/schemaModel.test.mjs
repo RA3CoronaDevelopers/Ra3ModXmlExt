@@ -17,6 +17,70 @@ test("GameObject has expected attributes", () => {
   assert.ok(attrs.some((a) => a.name === "inheritFrom"));
 });
 
+test("inheritFrom is a universal asset attribute, not only BaseInheritableAsset", () => {
+  // BAB / vanilla data accepts inheritFrom on FXList, AIMicroManagerData,
+  // ObjectCreationList, OnDemandTextureImage and AITargetingHeuristic even
+  // though the XSD only declares it on BaseInheritableAsset.
+  for (const name of [
+    "FXList",
+    "AIMicroManagerData",
+    "ObjectCreationList",
+    "OnDemandTextureImage",
+    "AITargetingHeuristic",
+  ]) {
+    assert.ok(
+      model.attributesOfElement(name).some((a) => a.name === "inheritFrom"),
+      `${name} should accept universal inheritFrom`,
+    );
+  }
+  // Structural elements that are not assets must not get the attribute.
+  assert.ok(
+    !model.attributesOfElement("Include").some((a) => a.name === "inheritFrom"),
+    "Include is not an asset and must not accept inheritFrom",
+  );
+});
+
+test("simpleContent extension attributes are preserved by the model generator", () => {
+  const sound = model.typeInfo("AudioFileRefWithWeight");
+  assert.equal(sound?.kind, "complex");
+  assert.ok(sound.attributes.some((a) => a.name === "Weight"));
+  assert.ok(sound.attributes.some((a) => a.name === "Volume"));
+
+  const subsound = model.typeInfo("MultisoundSubsoundRef");
+  assert.equal(subsound?.kind, "complex");
+  assert.ok(subsound.attributes.some((a) => a.name === "Weight"));
+  assert.ok(subsound.attributes.some((a) => a.name === "PitchShiftLow"));
+  assert.ok(subsound.attributes.some((a) => a.name === "PitchShiftHigh"));
+  assert.ok(subsound.attributes.some((a) => a.name === "Volume"));
+  assert.ok(subsound.attributes.some((a) => a.name === "PlayPercent"));
+  assert.ok(subsound.attributes.some((a) => a.name === "VolumeShift"));
+});
+
+test("contentInfoOfType unifies simple and simpleContent content semantics", () => {
+  const simple = model.contentInfoOfType("GameObjectWeakRef");
+  assert.equal(simple?.kind, "simple");
+  assert.equal(simple?.refType, "GameObject");
+
+  const sound = model.contentInfoOfType("AudioFileRefWithWeight");
+  assert.equal(sound?.kind, "simpleContent");
+  assert.equal(sound?.refType, "AudioFile");
+  assert.equal(sound?.isRef, true);
+
+  const subsound = model.contentInfoOfType("MultisoundSubsoundRef");
+  assert.equal(subsound?.kind, "simpleContent");
+  assert.equal(subsound?.refType, "BaseAudioEventInfo");
+
+  // Ordinary complex elements and structural elements have no content value.
+  assert.equal(model.contentInfoOfType("GameObject"), null);
+  assert.equal(model.contentInfoOfType("Include"), null);
+
+  // Inline simpleContent with a scalar base has content info but no refType.
+  const frame = model.contentInfoOfType("@inline:Frame");
+  assert.ok(frame, "inline simpleContent is exposed through contentInfoOfType");
+  assert.equal(frame?.refType, null);
+  assert.equal(frame?.base, "float");
+});
+
 test("attribute-level xas:refType is captured (module ids, map objects)", () => {
   // ModuleData@id is declared as <xs:attribute name="id" type="Poid"
   // xas:refType="ModuleData" />; the refType must reach every module subtype.

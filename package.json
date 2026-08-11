@@ -2,9 +2,10 @@
   "name": "ra3-mod-xml",
   "displayName": "%ra3modxml.displayName%",
   "description": "%ra3modxml.description%",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "publisher": "lanyi",
   "license": "SEE LICENSE IN LICENSE",
+  "icon": "images/icon.png",
   "repository": {
     "type": "git",
     "url": "https://git.ra3battle.cn/RA3CoronaDevelopers/Ra3ModXmlExt.git"

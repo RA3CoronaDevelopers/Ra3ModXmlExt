@@ -31,9 +31,15 @@
 与补全 / hover / 跳转 / 诊断完全一致（`refs.ts` 是唯一判定来源）：
 
 - 带 `xas:refType` 的属性值（如 `CommandSet` → `LogicCommandSet`）；
-- 带 `xas:refType` 的 simple-content 文本（如 `<CreateObject>ID</CreateObject>`）；
+- 带 `xas:refType` 的 simple-content 文本（如 `<CreateObject>ID</CreateObject>`，
+  含 simpleContent 复杂类型 `<Sound>AudioFile</Sound>`、`<Subsound>VoiceEvent</Subsound>`）；
 - `inheritFrom`（按元素自身类型过滤）；
 - 无 `refType` 的 `isRef` 属性（按同名 ID 匹配任意声明类型）。
+
+`inheritFrom` 对 `BaseAssetType` 系资产是通用合法属性（XSD 只在
+`BaseInheritableAsset` 声明，但原版数据在 `FXList` 等类型上也使用）。这里的
+“合法属性”判定与“设计上应显示引用计数”的 `referenceTargetTypes()` 是分开的：
+通用 `inheritFrom` 不会把每个资产类型都变成 CodeLens / 未引用报告的目标。
 
 不算引用：
 

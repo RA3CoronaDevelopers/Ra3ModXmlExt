@@ -39,3 +39,24 @@ test("model childTypeOf primitives", () => {
   assert.equal(model.childTypeOf("WeaponSlot_WeaponData", "Weapon"), null);
   assert.equal(model.childTypeOf(null, "Weapon"), null);
 });
+
+test("fragment roots prefer top-level AssetDeclaration types over name collisions", () => {
+  // <EvaEvent> is both a top-level asset and an FXNugget child. A fragment
+  // root has no parent context, so it must resolve to the top-level asset
+  // type (with Priority / TimeBetweenEvents etc.), not to EvaEventFXNugget.
+  const evaDoc = parseXml(
+    `<EvaEvent id="IncomingTransmission" Priority="100" TimeBetweenEvents="0ms" ExpirationTime="10000ms"/>`,
+  );
+  assert.equal(resolveElementType(evaDoc.root), "EvaEvent");
+  assert.ok(
+    model.attributesOfType("EvaEvent").some((a) => a.name === "Priority"),
+  );
+
+  const upgradeDoc = parseXml(`<UpgradeTemplate id="Upgrade_X" inheritFrom="Base"/>`);
+  assert.equal(resolveElementType(upgradeDoc.root), "UpgradeTemplate");
+
+  // Non-top-level fragment roots still fall back to the contextual child
+  // mapping (no AssetDeclaration child exists for Weapon).
+  const weaponDoc = parseXml(`<Weapon Ordering="PRIMARY_WEAPON"/>`);
+  assert.equal(resolveElementType(weaponDoc.root), "WeaponRef");
+});

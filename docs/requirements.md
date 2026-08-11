@@ -23,7 +23,7 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
 - 无前缀的路径相对于当前文件所在目录；
 - `ART:` 路径支持“文件名前两个小写字母作为子目录”的匹配（如 `JUAntiShip` → `ju/JUAntiShip`）。
 
-继承机制：`inheritFrom` 让一个元素默认获得目标元素的所有内容；具体合并行为由 `xai:joinAction`（`uri:ea.com:eala:asset:instance` 命名空间）控制，实际项目中出现的取值为 `Replace`、`Remove`。
+继承机制：`inheritFrom` 让一个元素默认获得目标元素的所有内容；具体合并行为由 `xai:joinAction`（`uri:ea.com:eala:asset:instance` 命名空间）控制，实际项目中出现的取值为 `Replace`、`Remove`。XSD 只在 `BaseInheritableAsset` 上显式声明 `inheritFrom`，但原版与 Corona 数据也在 `FXList`、`AIMicroManagerData` 等 `BaseAssetType` 系资产上使用它，插件按“所有资产类型的通用属性”处理。
 
 全部 XML 语法由 XSD 定义：SDK 自带 `Schemas/xsd/CnC3Types.xsd`（及其 800+ 个子 XSD）。大型 Mod 项目（如 Corona）还会携带自己修改过的 XSD 副本。
 
@@ -41,10 +41,11 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
      - 枚举值（XSD `xs:enumeration`）；
      - `$DEFINE` 常量（如 `$CIV_HEALTH_SMALL`）；
      - `<Include source>` 补全可解析的文件路径（`DATA:` / `ART:` / `AUDIO:`）。
-   - **元素文本内容（simple content）**：带 `xas:refType` 的简单内容元素
-     （如 `<CreateObject>ID</CreateObject>`）在标签间补全对应类型的资产 ID、
-     枚举或 `$DEFINE`；补全出的 simple-content 元素必须是可填值的成对标签
-     （`<Name></Name>`），且内容区已输入 `<` 时不得产生 `<<`。
+   - **元素文本内容（simple content）**：带 `xas:refType` 的内容元素
+     （simple type 如 `<CreateObject>ID</CreateObject>`，simpleContent 复杂类型
+     如 `<Sound>AudioFile</Sound>`、`<Subsound>VoiceEvent</Subsound>`）在标签间
+     补全对应类型的资产 ID、枚举或 `$DEFINE`；补全出的 simple-content 元素必须
+     是可填值的成对标签（`<Name></Name>`），且内容区已输入 `<` 时不得产生 `<<`。
 3. **引用提示（Hover）**：元素/属性悬停显示 XSD 文档、类型、默认值；资产 ID 悬停显示定义位置；`$DEFINE` 悬停显示值与定义位置。
    - 元素文本内容（simple content 引用）悬停同样显示定义位置。
 4. **引用导航**：

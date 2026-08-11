@@ -308,6 +308,21 @@ test("element and attribute name completions work without an index", async () =>
   assert.ok(labels.includes("Surfaces"));
 });
 
+test("universal inheritFrom is offered on asset attribute completion", async () => {
+  const text = `<AssetDeclaration>\n  <FXList `;
+  const line1 = text.split("\n")[1];
+  const pos = new Position(1, line1.length);
+
+  const items = await providerNoIndex.provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const labels = listItems(items).map((i) => i.label);
+  assert.ok(labels.includes("inheritFrom"), "FXList offers universal inheritFrom");
+  assert.ok(labels.includes("id"));
+});
+
 test("attribute completion after a closed quote inserts a space", async () => {
   const text =
     `<AssetDeclaration>\n` +
@@ -759,6 +774,75 @@ test("simple-content value completion works before the closing tag is typed", as
   // The unclosed element's end is the document end, so the typed "C" is
   // still a real token and the range covers it.
   assert.equal(item.range.start.character, line.indexOf(">C") + 1);
+  assert.equal(item.range.end.character, pos.character);
+});
+
+test("simpleContent complex child inserts a value pair and triggers suggest", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <AudioEvent id="A">\n` +
+    `    <S`;
+  const line = text.split("\n")[2];
+  const pos = new Position(2, line.length);
+
+  const items = await providerNoIndex.provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const sound = listItems(items).find((i) => i.label === "Sound");
+  assert.ok(sound, "Sound child is offered under AudioEvent");
+  assert.equal(sound.insertText.value, "Sound>$1</Sound>");
+  assert.ok(sound.command, "simpleContent child re-triggers value suggest");
+});
+
+test("simpleContent complex text offers typed asset ids as the value", async () => {
+  const text =
+    `<AssetDeclaration>\n` +
+    `  <AudioEvent id="A">\n` +
+    `    <Sound>V</Sound>\n` +
+    `  </AudioEvent>\n` +
+    `</AssetDeclaration>`;
+  const line = text.split("\n")[2];
+  const pos = new Position(2, line.indexOf(">V") + 2);
+  const audioFile = {
+    type: "AudioFile",
+    id: "VoiceFile",
+    file: "AudioFiles.xml",
+    line: 1,
+    origin: "project",
+  };
+  const audioEvent = {
+    type: "AudioEvent",
+    id: "VoiceEvent",
+    file: "Voice.xml",
+    line: 1,
+    origin: "project",
+  };
+  const idx = {
+    assets: new Map([
+      ["AudioFile", new Map([["voicefile", [audioFile]]])],
+      ["AudioEvent", new Map([["voiceevent", [audioEvent]]])],
+    ]),
+    assetsById: new Map([
+      ["voicefile", [audioFile]],
+      ["voiceevent", [audioEvent]],
+    ]),
+  };
+
+  const items = await makeProvider(idx).provideCompletionItems(
+    makeDocument(text),
+    pos,
+    token,
+  );
+  const labels = items.map((i) => i.label);
+  assert.ok(labels.includes("VoiceFile"));
+  assert.ok(
+    !labels.includes("VoiceEvent"),
+    "Sound content is filtered by AudioFileRefWithWeight refType AudioFile",
+  );
+  const item = items.find((i) => i.label === "VoiceFile");
+  assert.equal(item.range.start.character, line.indexOf(">V") + 1);
   assert.equal(item.range.end.character, pos.character);
 });
 

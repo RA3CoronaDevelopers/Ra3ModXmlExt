@@ -2,7 +2,9 @@ import {
   allTypeNames,
   attributesOfType,
   canonicalTypeName,
+  contentInfoOfType,
   elementTypeName,
+  isAssetType,
   isAssignableTo,
   typeChain,
   typeInfo,
@@ -74,7 +76,7 @@ export function isReferenceAttributeOfType(
   typeName: string | null,
   attrName: string,
 ): boolean {
-  if (attrName.toLowerCase() === "inheritfrom") return true;
+  if (attrName.toLowerCase() === "inheritfrom") return isAssetType(typeName);
   const attr = attributesOfType(typeName).find((a) => a.name === attrName);
   if (attr == null || !(attr.refType != null || attr.isRef)) return false;
   // Definitions (id) and pipeline-local references (Poid) are not references
@@ -125,6 +127,7 @@ export function resolveReferenceTargetsForType(
   let selfType: string | null = null;
 
   if (nameLower === "inheritfrom") {
+    if (!isAssetType(typeName)) return [];
     selfType = typeName;
   } else {
     const attr = attributesOfType(typeName).find((a) => a.name === attrName);
@@ -141,7 +144,9 @@ export function resolveReferenceTargetsForType(
 /**
  * True when an element's text content is a typed reference to a global
  * asset: the element's resolved XSD type is a simple type carrying an
- * `xas:refType` (e.g. `<CreateObject>` with `GameObjectWeakRef`).
+ * `xas:refType`, or a simpleContent complex type carrying `xas:refType`
+ * (e.g. `<CreateObject>` with `GameObjectWeakRef`, `<Sound>` with
+ * `AudioFileRefWithWeight`).
  *
  * Only *typed* refs are treated as content references. Generic untyped
  * `AssetReference` content is used by real data for shader constants,
@@ -152,8 +157,8 @@ export function resolveReferenceTargetsForType(
  */
 export function isReferenceContentType(typeName: string | null): boolean {
   if (!typeName) return false;
-  const info = typeInfo(typeName);
-  if (info?.kind !== "simple") return false;
+  const info = contentInfoOfType(typeName);
+  if (!info) return false;
   if (typeChain(typeName).includes("Poid")) return false;
   return info.refType != null;
 }
@@ -175,8 +180,8 @@ export function resolveContentReferenceTargets(
     idx.assetsById.get(id.toLowerCase()),
   );
   if (!defs.length) return [];
-  const info = typeInfo(typeName);
-  const refType = info?.kind === "simple" ? info.refType : null;
+  const info = contentInfoOfType(typeName);
+  const refType = info?.refType ?? null;
   return filterAndScoreDefs(defs, refType, null);
 }
 
@@ -224,12 +229,28 @@ export function mergeLocalAndGlobalDefs(
 let referenceTargetTypeSet: Set<string> | null = null;
 
 /**
+ * True when the XSD itself declares `inheritFrom` for the type. This is the
+ * narrower "designed reference target" signal used by CodeLens / unreferenced
+ * reports; the universal BAB `inheritFrom` attribute must not widen it to
+ * every BaseAssetType descendant.
+ */
+function xsdDeclaresInheritFrom(typeName: string): boolean {
+  const info = typeInfo(typeName);
+  return (
+    info?.kind === "complex" &&
+    info.attributes.some((a) => a.name.toLowerCase() === "inheritfrom")
+  );
+}
+
+/**
  * The set of XSD types that are "reference targets by design": at least one
  * typed reference attribute / simple-content reference points at them, or
- * they are inheritable (`inheritFrom`). Types outside this set are
- * auto-registered / structural (settings, map metadata, w3x sub-assets...),
- * so a zero reference count is their normal state and counts would only be
- * noise.
+ * the XSD explicitly declares them inheritable (`inheritFrom`). The universal
+ * BAB `inheritFrom` attribute on every BaseAssetType descendant is a separate
+ * legality concern and intentionally does NOT widen this set. Types outside
+ * this set are auto-registered / structural (settings, map metadata, w3x
+ * sub-assets...), so a zero reference count is their normal state and counts
+ * would only be noise.
  */
 export function referenceTargetTypes(): ReadonlySet<string> {
   if (referenceTargetTypeSet) return referenceTargetTypeSet;
@@ -246,7 +267,8 @@ export function referenceTargetTypes(): ReadonlySet<string> {
         if (isLocalReferenceAttribute(typeName, attr.name)) continue;
         if (attr.refType) add(attr.refType);
       }
-      if (info.attributes.some((a) => a.name.toLowerCase() === "inheritfrom")) {
+      if (info.content?.refType) add(info.content.refType);
+      if (xsdDeclaresInheritFrom(typeName)) {
         add(typeName);
       }
     } else if (

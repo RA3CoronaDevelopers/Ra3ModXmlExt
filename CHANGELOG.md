@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.23 — 2026-08-11
+
+### Fixed
+
+- `inheritFrom` is now accepted on all `BaseAssetType`-derived assets (e.g. `FXList`, `AIMicroManagerData`, `ObjectCreationList`, `OnDemandTextureImage`, `AITargetingHeuristic`). The XSD only declares it on `BaseInheritableAsset`, but vanilla and Corona data use it more broadly. Attribute legality is now separate from the CodeLens / Find All References “reference target by design” filter, so the universal attribute does not widen the code-lens type list.
+- `simpleContent` complex types (`AudioFileRefWithWeight`, `MultisoundSubsoundRef`) keep their XSD attributes (`Weight`, `Volume`, `PitchShiftLow/High`, ...) and their text content (`<Sound>AudioFile</Sound>`, `<Subsound>VoiceEvent</Subsound>`) is now handled as a typed asset reference by completion, hover, navigation, diagnostics, the semantic reference index, and Find All References.
+- Fragment roots whose name also appears as a nested child type (e.g. `<EvaEvent>`, `<UpgradeTemplate>`) now resolve to the top-level `AssetDeclaration` type instead of the colliding child type.
+- Element-name completion for simple-content children now re-triggers value suggestions after inserting the `<Name>$1</Name>` snippet.
+
+### Added
+
+- 128×128 PNG extension icon (converted from `images/icon.webp`). The `.vsix` no longer bundles the `images` folder, so the large GIF demos stay out of the package.
+
 ## 0.1.22 — 2026-08-11
 
 ### Fixed

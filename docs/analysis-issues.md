@@ -1958,3 +1958,173 @@ id”），wrapper 根不在 XSD 里的文件报 `unknown-element`，引用在�
   define / 子元素结构检查。多上下文取并集去重。
 - `<Include type="all|instance|reference">` 与 `xi:include` 语义不同：前者的目标
   是完整 `AssetDeclaration`，不进入片段模式；后者才允许片段文件。
+
+---
+
+## 三十、问题分析（2026-08-11）：`FXList inheritFrom` 误报未知属性与模型修正
+
+### 现象
+
+`GlobalData/FX_List.xml` 中：
+
+```xml
+<FXList id="FX_LargeEMCannonHitCrit" inheritFrom="FX_LargeEMCannonHit">
+  <NuggetList>
+    <ParticleSystem Particle="CritHit" OrientToObject="true" Ricochet="true"/>
+  </NuggetList>
+</FXList>
+```
+
+报 `Unknown attribute "inheritFrom" for <FXList>`。
+
+### 根因（三个独立问题）
+
+**A. `inheritFrom` 的 XSD 白名单落后于 BAB 实际语义**
+
+- SDK 与 Corona 的 `AssetTypeFXList.xsd` 都写 `FXList extends BaseAssetType`；
+- `BaseAssetType` 只有 `id` / `typeHashCode` / `buildRule`，`inheritFrom` 只挂在
+  `BaseInheritableAsset` 上；
+- 内置模型因此认为 `FXList` 没有 `inheritFrom`，diagnostics 的 unknown-attribute
+  直接按模型属性表判断；
+- 但引用 / hover / 跳转层早就把 `inheritFrom` 当作通用引用属性处理，只有“属性名
+  合法性”这一层还在用 XSD 白名单，所以表现为局部不一致。
+
+证据（用插件同一套解析器 + 模型扫描）：
+
+| 类型 | 原版 SageXml 顶层使用 `inheritFrom` | Corona 顶层使用 |
+|---|---|---|
+| `AIMicroManagerData` | 233 | 128 |
+| `FXList` | 142 | 10 |
+| `AITargetingHeuristic` | 10 | 5 |
+| `ObjectCreationList` | 2 | 0 |
+| `OnDemandTextureImage` | 0 | 9 |
+
+原版 `FXListSoviet.xml` / `FXListJapan.xml` 大量使用该写法，说明这是 BAB 接受的
+真实语义，不是用户笔误。
+
+**B. `simpleContent` 复杂类型的属性被生成器丢弃**
+
+`xsd-to-model.mjs` 的 `expandComplexType` 只读 `complexContent/extension`，没有读
+`simpleContent/extension`。因此：
+
+- `AudioFileRefWithWeight`（XSD 有 `Weight` / `Volume`）在模型里属性为空；
+- `MultisoundSubsoundRef`（XSD 有 `Weight` / `PitchShiftLow/High` / `Volume` /
+  `PlayPercent` / `VolumeShift`）同样为空。
+
+Corona 实测 `<Sound Weight="...">` 565 处、`<Subsound Weight="...">` 33 处会被误报。
+simpleContent 复杂类型的**文本内容**引用语义（如 `<Sound>AudioFile</Sound>` 的补全 /
+hover / 跳转 / 诊断 / FAR）在第三十一轮补齐，见下。
+
+**C. 片段根元素仍受“元素名→类型”全局单映射影响**
+
+`EvaEvent` 既是顶层资产，也是 `FXNuggetTypes` 的子元素
+（`EvaEventFXNugget`）。全局 `elementTypeName("EvaEvent")` 取到的是先注册的
+`EvaEventFXNugget`。完整 `AssetDeclaration` 文档有父上下文可以纠正；但
+`additionalmaps/ALLC.xml` 这类根元素就是 `<EvaEvent>` 的片段没有父上下文，于是
+`Priority`、`TimeBetweenEvents`、`ExpirationTime` 等合法属性被当成未知。
+
+### 修复
+
+1. **通用属性合法性集中到模型层**：`schemaModel.ts` 新增
+   `isAssetType()`（`BaseAssetType` 及其后代）与通用 `inheritFrom` 属性；
+   `attributesOfType()` 对资产类型统一返回它。诊断、属性补全、hover 自动一致。
+2. **CodeLens / FAR 的“设计目标”判定保持窄口径**：`refs.ts` 的
+   `referenceTargetTypes()` 仍只看 XSD 显式声明的 `inheritFrom` 与类型化引用，
+   不会因为通用属性把全部 317 个资产类型变成计数目标。`isReferenceAttributeOfType`
+   与 `resolveReferenceTargetsForType` 同步改为只对资产类型接受 `inheritFrom`。
+3. **生成器支持 `simpleContent/extension`**：`expandComplexType` 现在同时读
+   `complexContent` 与 `simpleContent` 的 extension，重新生成模型后
+   `AudioFileRefWithWeight` / `MultisoundSubsoundRef` 属性齐全。
+4. **片段根优先取顶层类型**：`schemaModel.topLevelElementType()` 从
+   `AssetDeclaration` 的子元素声明解析类型；`resolveElementType()` 对文档根先用它，
+   再回退全局映射；hover 的元素名展示也使用已解析类型。
+
+### 测试（举一反三，全量 210 通过）
+
+- `schemaModel.test.mjs`：`FXList` / `AIMicroManagerData` / `ObjectCreationList` /
+  `OnDemandTextureImage` / `AITargetingHeuristic` 均接受 `inheritFrom`，
+  `Include` 不接受；`AudioFileRefWithWeight` / `MultisoundSubsoundRef` 属性齐全；
+- `refs.test.mjs`：`FXList inheritFrom` 是引用，`Include inheritFrom` 不是；
+  `Credits` 接受通用 `inheritFrom` 但仍是 `isReferenceTargetType() === false`，
+  证明两个判定已分离；
+- `typeContext.test.mjs`：片段根 `<EvaEvent>` / `<UpgradeTemplate>` 解析为顶层
+  类型，`<Weapon>` 仍回退到 `WeaponRef`；
+- `completion.test.mjs`：`FXList` 属性补全出现 `inheritFrom`；
+- `contentFeatures.test.mjs`：`FXList inheritFrom`、`<Sound Weight>`、片段根
+  `<EvaEvent>` 不再报 unknown-attribute，真实拼写错误仍报。
+
+### 文档同步
+
+- `docs/requirements.md`：继承机制补充“对资产类型通用”；
+- `docs/plan.md`：XSD 结构说明补充实测差异与两个判定的分离；
+- `docs/features-reference-counts.md`：说明通用 `inheritFrom` 不扩大 CodeLens
+  目标集合。
+
+---
+
+## 三十一、问题分析（2026-08-11）：补齐所有“内容即引用”的语义（含 simpleContent 复杂类型）
+
+### 目标
+
+上一轮只恢复了 `AudioFileRefWithWeight` / `MultisoundSubsoundRef` 的属性，但它们
+的文本内容（`<Sound>AudioFile</Sound>`、`<Subsound>VoiceEvent</Subsound>`）仍然
+没有按引用处理。本轮把 simple-content 的内容语义统一到一条管线：**凡是元素文本
+内容带 `xas:refType` 的，无论底层是 simple type 还是 simpleContent complexType，
+都参与补全 / hover / 跳转 / 诊断 / 引用索引 / FAR**。
+
+### 真实项目验证
+
+用插件同一套解析器 + 模型扫描 Corona `Data`（7540 个 XML，跳过 w3x）：
+
+| 类别 | 唯一元素/类型组合 | 出现次数 | 典型元素 |
+|---|---|---|---|
+| 带 `refType` 的内容引用 | 62 | 20,813 | `Sound`→AudioFile、`Subsound`→BaseAudioEventInfo、`CreateObject`→GameObject、`TriggeredBy`→UpgradeTemplate |
+| 无 `refType` 的 `isRef` 内容 | 5 | 1,150 | `Value`/`AddEmotion`/`Compare`/`Campaign`/`Mission`→AssetReference |
+| 普通标量/枚举内容 | 6 | 9,012 | `IncludeThing`/`ExcludeThing`→WeakReference、`Script`、`SpecificBarrelOverride` |
+
+结论：
+
+- `Sound` / `Attack` / `Decay`（`AudioFileRefWithWeight`）内容确实是 `AudioFile`
+  引用；`Subsound`（`MultisoundSubsoundRef`）内容确实是 `BaseAudioEventInfo`
+  引用，必须纳入全局引用语义。
+- `AssetReference` 系的无类型内容（`Value` 等）是着色器常量、脚本参数等，
+  **不应**按全局资产 ID 解析；保持上一轮“只处理带 refType 的内容”的边界。
+- `IncludeThing` / `ExcludeThing` 等 `WeakReference` 内容是对象过滤/局部语义，
+  也没有 refType，不参与全局引用。
+- 内联 simpleContent（如 w3x 的 `Frame`）是 `xs:float` 标量，`contentInfoOfType`
+  能识别但 `refType === null`，不会误报。
+
+### 实现
+
+1. **模型层**：`schemaModel.ts` 新增 `SimpleContentInfo` / `ContentTypeInfo` 和
+   `contentInfoOfType()`；`ComplexTypeInfo` 增加可选 `content` 字段。
+   `xsd-to-model.mjs` 对 `simpleContent/extension` 记录 base 类型的
+   `refType` / `isRef` / 枚举 / list / `$DEFINE` 能力。
+2. **引用判定**：`refs.ts` 的 `isReferenceContentType()` 与
+   `resolveContentReferenceTargets()` 改用统一内容描述；simpleContent 复杂类型
+   的 `refType` 也进入 `referenceTargetTypes()`，保证 CodeLens 类型过滤正确。
+3. **索引**：`records.ts` 内容记录的 `refType` 从统一内容描述提取，FAR 与
+   引用计数不再丢 `Sound` / `Subsound`。
+4. **补全**：`completion.ts` 的元素片段、内容值补全、子元素补全触发 suggest 均
+   统一走 `contentInfoOfType()`，`<Sound>` 会生成 `<Sound>$1</Sound>` 并弹
+   AudioFile 候选。
+5. **hover / 导航 / 诊断**：全部改为从 `contentInfoOfType()` 取 `refType`。
+
+### 测试（全量 219 通过）
+
+- `schemaModel.test.mjs`：`contentInfoOfType` 对 simple 与 simpleContent 统一；
+- `refs.test.mjs`：`AudioFileRefWithWeight` / `MultisoundSubsoundRef` 是内容引用，
+  `@inline:Frame` 不是；同名 AudioFile / AudioEvent 严格按 refType 过滤；
+- `records.test.mjs`：`Sound` / `Subsound` 文本进入引用索引；
+- `completion.test.mjs`：`<Sound>` 补全成值对并触发 suggest，内容值只补
+  AudioFile；
+- `contentFeatures.test.mjs`：`<Sound>` hover / Ctrl+点击 / `<Subsound>` 未解析
+  诊断；
+- `referenceProvider.test.mjs`：FAR 返回 `Sound` 文本引用。
+
+### 文档同步
+
+- `docs/requirements.md`：simple-content 元素补充 simpleContent 复杂类型示例；
+- `docs/plan.md`：simple-content 文本引用说明补充第三十一轮扩展；
+- `docs/features-reference-counts.md`：引用语义说明补充“含 simpleContent 复杂
+  类型”。

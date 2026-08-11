@@ -12,7 +12,7 @@
 
 import type { LineMap, XmlDocument } from "../language/xmlParser";
 import type { ShallowDocument } from "./shallowScan";
-import { attributesOfType, typeInfo } from "../model/schemaModel";
+import { attributesOfType, contentInfoOfType } from "../model/schemaModel";
 import { resolveElementType } from "../language/typeContext";
 import {
   isReferenceAttributeOfType,
@@ -246,10 +246,10 @@ function collectReferenceRecords(
         continue;
       }
       const start = el.startTagEnd + raw.indexOf(value);
-      const info = typeInfo(elType);
+      const info = contentInfoOfType(elType);
       out.push({
         kind: "content",
-        refType: info?.kind === "simple" ? info.refType : null,
+        refType: info?.refType ?? null,
         selfType: null,
         value,
         line: lineOf(lineMap, start),

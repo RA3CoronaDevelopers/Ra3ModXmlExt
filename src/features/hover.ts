@@ -59,12 +59,15 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     // Element name.
     const nameStart = el.start + 1;
     if (offset >= nameStart && offset <= nameStart + el.name.length) {
-      return this.elementHover(el.name);
+      return this.elementHover(el.name, elType);
     }
     return null;
   }
 
-  private elementHover(name: string): vscode.Hover | null {
+  private elementHover(
+    name: string,
+    resolvedType: string | null = null,
+  ): vscode.Hover | null {
     if (name.startsWith("xi:")) {
       const md = new vscode.MarkdownString();
       md.appendCodeblock(`<${name}>`, "xml");
@@ -75,7 +78,9 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       );
       return new vscode.Hover(md);
     }
-    const type = model.elementTypeName(name);
+    const type =
+      resolvedType ??
+      (model.topLevelElementType(name) ?? model.elementTypeName(name));
     const info = type ? model.typeInfo(type) : undefined;
     const md = new vscode.MarkdownString();
     md.appendCodeblock(`<${name}>`, "xml");
@@ -87,7 +92,7 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       md.appendMarkdown(
         `${t(
           "Attributes: {0} · Children: {1}",
-          info.attributes.length,
+          model.attributesOfType(type).length,
           info.children.length,
         )}  \n`,
       );
@@ -267,8 +272,8 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     }
     const targets = resolveContentReferenceTargets(idx, elType, value);
     if (targets.length) return this.definitionsHover(targets, document);
-    const info = elType ? model.typeInfo(elType) : undefined;
-    const refType = info?.kind === "simple" ? info.refType : null;
+    const info = elType ? model.contentInfoOfType(elType) : undefined;
+    const refType = info?.refType ?? null;
     return this.noDefinitionHover(refType ? "typed" : "untyped", refType ?? undefined);
   }
 

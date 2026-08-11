@@ -113,3 +113,26 @@ test("extractIndexRecords records typed references and skips non-references", ()
     false,
   );
 });
+
+test("extractIndexRecords records simpleContent complex text as references", () => {
+  const text = `<AssetDeclaration>
+  <AudioEvent id="A">
+    <Sound Weight="100">VoiceFile</Sound>
+  </AudioEvent>
+  <Multisound id="M">
+    <Subsound Weight="50">VoiceEvent</Subsound>
+  </Multisound>
+</AssetDeclaration>`;
+  const lineMap = new LineMap(text);
+  const records = extractIndexRecords(parseXml(text), lineMap, text);
+  const content = records.references.filter((r) => r.kind === "content");
+
+  const sound = content.find((r) => r.value === "VoiceFile");
+  assert.ok(sound, "Sound text is recorded as a content reference");
+  assert.equal(sound.refType, "AudioFile");
+  assert.equal(sound.selfType, null);
+
+  const subsound = content.find((r) => r.value === "VoiceEvent");
+  assert.ok(subsound, "Subsound text is recorded as a content reference");
+  assert.equal(subsound.refType, "BaseAudioEventInfo");
+});

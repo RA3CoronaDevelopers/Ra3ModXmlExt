@@ -177,3 +177,80 @@ test("FAR from the reference site itself returns the same result", async () => {
   assert.equal(refs.length, 1);
   assert.equal(refs[0].range.start.line, 4);
 });
+
+test("FAR includes simpleContent complex content references", async () => {
+  const text = `<AssetDeclaration>
+  <AudioFile id="VoiceFile"/>
+  <AudioEvent id="A">
+    <Sound>VoiceFile</Sound>
+  </AudioEvent>
+</AssetDeclaration>`;
+  const parse = parseXml(text);
+  const lineMap = new LineMap(text);
+  const records = extractIndexRecords(parse, lineMap, text);
+  const def = {
+    type: "AudioFile",
+    id: "VoiceFile",
+    file: FILE,
+    line: 2,
+    origin: "project",
+  };
+  const lookup = {
+    assets: new Map([["AudioFile", new Map([["voicefile", [def]]])]]),
+    assetsById: new Map([["voicefile", [def]]]),
+  };
+  const references = buildReferenceIndex([{ file: FILE, records }], lookup);
+  const idx = {
+    ...lookup,
+    references,
+    complete: true,
+    phase: "art",
+    projectDir: "C:/mod",
+    sdkDir: "C:/sdk",
+    defines: new Map(),
+    files: new Map(),
+    streams: [],
+    manifests: new Map(),
+    sourceCandidates: [],
+    diagnostics: [],
+    stats: {},
+  };
+  const scope = { merged: idx };
+  const localParse = parseXml(text);
+  const localLineMap = new LineMap(text);
+  const localIndexer = {
+    readDom: async (path) =>
+      path === FILE
+        ? { file: { path: FILE }, parse: localParse, lineMap: localLineMap, records: null }
+        : null,
+  };
+  const localWs = {
+    isRa3Workspace: () => true,
+    getScope: async () => scope,
+    indexer: localIndexer,
+    indexerForFile: () => localIndexer,
+    activeIndexer: () => localIndexer,
+    recordsSyncSurfaceFor: () => ({
+      get index() {
+        return scope.merged;
+      },
+      invalidate: () => {},
+      scheduleRebuild: () => {},
+    }),
+  };
+  const provider = new Ra3ReferenceProvider(localWs);
+  const document = makeDocument(text);
+  const defLine = text.split("\n")[1];
+  const defPos = new Position(1, defLine.indexOf('id="') + 4);
+
+  const refs = await provider.provideReferences(document, defPos, {
+    includeDeclaration: true,
+  }, {});
+  assert.ok(refs, "references are returned");
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].range.start.line, 3);
+  assert.equal(
+    text.split("\n")[3].slice(refs[0].range.start.character, refs[0].range.end.character),
+    "VoiceFile",
+  );
+});

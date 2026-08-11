@@ -9,6 +9,7 @@ import {
   isReferenceAttribute,
   isReferenceAttributeOfType,
   isReferenceContentType,
+  isReferenceTargetType,
   resolveContentReferenceTargets,
   resolveReferenceTargets,
   resolveReferenceTargetsForType,
@@ -70,7 +71,25 @@ test("isReferenceAttribute distinguishes references from enums/paths", () => {
   // Typed references and inheritFrom are references.
   assert.equal(isReferenceAttribute("GameObject", "CommandSet"), true);
   assert.equal(isReferenceAttribute("GameObject", "inheritFrom"), true);
+  assert.equal(isReferenceAttribute("FXList", "inheritFrom"), true);
+  assert.equal(isReferenceAttribute("AIMicroManagerData", "inheritFrom"), true);
   assert.equal(isReferenceAttribute("FireWeaponNugget", "WeaponName"), true);
+  // inheritFrom is an asset-level attribute; non-asset elements stay non-refs.
+  assert.equal(isReferenceAttribute("Include", "inheritFrom"), false);
+});
+
+test("universal inheritFrom legality is separate from CodeLens target design", () => {
+  // FXList and other BaseAssetType descendants legally accept inheritFrom,
+  // but the XSD does not declare it there. That must not widen the designed
+  // reference-target set (Credits is still not a CodeLens target).
+  assert.ok(
+    model.attributesOfElement("FXList").some((a) => a.name === "inheritFrom"),
+  );
+  assert.ok(
+    model.attributesOfElement("Credits").some((a) => a.name === "inheritFrom"),
+  );
+  assert.equal(isReferenceTargetType("Credits"), false);
+  assert.equal(isReferenceTargetType("FXList"), true); // via FXListRef, not universal attr
 });
 
 test("attribute-level xas:refType is preserved in the model", () => {
@@ -285,6 +304,46 @@ test("typed simple content resolves like a typed attribute reference", () => {
   const targets = resolveContentReferenceTargets(idx, "GameObjectWeakRef", "CrateDebris_01");
   assert.equal(targets.length, 1);
   assert.equal(targets[0].def.type, "GameObject");
+});
+
+test("simpleContent complex types resolve as typed content references", () => {
+  // <Sound>AudioFile</Sound> / <Subsound>VoiceEvent</Subsound> use
+  // simpleContent complex types (AudioFileRefWithWeight /
+  // MultisoundSubsoundRef) whose text is still a typed asset reference.
+  assert.equal(isReferenceContentType("AudioFileRefWithWeight"), true);
+  assert.equal(isReferenceContentType("MultisoundSubsoundRef"), true);
+  // Inline Frame's simpleContent is a scalar float, not a reference.
+  assert.equal(isReferenceContentType("@inline:Frame"), false);
+
+  const idx = {
+    assetsById: new Map([
+      [
+        "shared",
+        [
+          { type: "AudioFile", id: "Shared", file: "Audio.xml", line: 1, origin: "project" },
+          { type: "AudioEvent", id: "Shared", file: "Voice.xml", line: 2, origin: "project" },
+        ],
+      ],
+    ]),
+    assets: new Map(),
+    defines: new Map(),
+  };
+
+  const soundTargets = resolveContentReferenceTargets(
+    idx,
+    "AudioFileRefWithWeight",
+    "Shared",
+  );
+  assert.equal(soundTargets.length, 1);
+  assert.equal(soundTargets[0].def.type, "AudioFile");
+
+  const subsoundTargets = resolveContentReferenceTargets(
+    idx,
+    "MultisoundSubsoundRef",
+    "Shared",
+  );
+  assert.equal(subsoundTargets.length, 1);
+  assert.equal(subsoundTargets[0].def.type, "AudioEvent");
 });
 
 test("untyped and pipeline-local content is not a global reference", () => {

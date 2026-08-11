@@ -33,6 +33,21 @@ export interface ComplexTypeInfo {
   attributes: AttributeInfo[];
   base: string | null;
   doc: string;
+  /**
+   * Present only for complexType + simpleContent types (e.g.
+   * AudioFileRefWithWeight / MultisoundSubsoundRef). Describes the text
+   * between the tags just like a simple type's value semantics.
+   */
+  content?: SimpleContentInfo | null;
+}
+
+export interface SimpleContentInfo {
+  refType: string | null;
+  isRef: boolean;
+  enumValues: string[];
+  isList: boolean;
+  allowsDefine: boolean;
+  base: string | null;
 }
 
 export interface SimpleTypeInfo {
@@ -48,6 +63,24 @@ export interface SimpleTypeInfo {
 
 export type TypeInfo = ComplexTypeInfo | SimpleTypeInfo;
 
+/**
+ * Unified value semantics for element text content. Both simple types
+ * (`<CreateObject>` -> GameObjectWeakRef) and simpleContent complex types
+ * (`<Sound>` -> AudioFileRefWithWeight) share this shape so the completion /
+ * hover / navigation / diagnostics / indexer pipelines do not have to know
+ * which XSD construct produced the content.
+ */
+export interface ContentTypeInfo {
+  kind: "simple" | "simpleContent";
+  refType: string | null;
+  isRef: boolean;
+  enumValues: string[];
+  isList: boolean;
+  allowsDefine: boolean;
+  base: string | null;
+  doc: string;
+}
+
 interface RawModel {
   version: number;
   rootXsd: string;
@@ -58,6 +91,33 @@ interface RawModel {
 }
 
 const model = schemaModel as unknown as RawModel;
+
+/**
+ * `inheritFrom` is accepted by BAB / real RA3 data on BaseAssetType-derived
+ * assets even though the XSD only declares it on BaseInheritableAsset
+ * (vanilla SageXml uses it on FXList, AIMicroManagerData,
+ * AITargetingHeuristic, ObjectCreationList, ...). It is therefore exposed as
+ * a universal attribute for every asset type.
+ *
+ * This is deliberately separate from `referenceTargetTypes()` in refs.ts:
+ * "may legally appear in the document" and "is a designed CodeLens / FAR
+ * reference target" are different decisions.
+ */
+const UNIVERSAL_INHERIT_FROM: AttributeInfo = {
+  name: "inheritFrom",
+  required: false,
+  default: null,
+  doc: "Inherits another asset of the same type.",
+  kind: "simple",
+  type: "@attr:inheritFrom",
+  refType: null,
+  enumValues: [],
+  isList: false,
+  allowsDefine: false,
+  isRef: false,
+  isBoolean: false,
+  base: "string",
+};
 
 /** Lowercase type name -> canonical (XSD) type name. */
 const typeNameIndex = new Map<string, string>();
@@ -109,6 +169,43 @@ export function typeInfo(name: string): TypeInfo | undefined {
   return model.types[name];
 }
 
+/**
+ * Returns content-value semantics for a type, or null when the element is a
+ * normal complex element (children, not text).
+ */
+export function contentInfoOfType(
+  typeName: string | null,
+): ContentTypeInfo | null {
+  if (!typeName) return null;
+  const info = model.types[canonicalTypeName(typeName) ?? typeName];
+  if (!info) return null;
+  if (info.kind === "simple") {
+    return {
+      kind: "simple",
+      refType: info.refType,
+      isRef: info.isRef,
+      enumValues: info.enumValues,
+      isList: info.isList,
+      allowsDefine: info.allowsDefine,
+      base: info.base,
+      doc: info.doc,
+    };
+  }
+  if (info.kind === "complex" && info.content) {
+    return {
+      kind: "simpleContent",
+      refType: info.content.refType,
+      isRef: info.content.isRef,
+      enumValues: info.content.enumValues,
+      isList: info.content.isList,
+      allowsDefine: info.content.allowsDefine,
+      base: info.content.base,
+      doc: info.doc,
+    };
+  }
+  return null;
+}
+
 export function elementTypeName(name: string): string | null {
   const t = elementToType.get(name);
   return t ? t : null;
@@ -135,7 +232,23 @@ export function attributesOfElement(name: string): AttributeInfo[] {
 export function attributesOfType(typeName: string | null): AttributeInfo[] {
   if (!typeName) return [];
   const info = model.types[canonicalTypeName(typeName) ?? typeName];
-  return info && info.kind === "complex" ? info.attributes : [];
+  if (!info || info.kind !== "complex") return [];
+  if (
+    isAssetType(typeName) &&
+    !info.attributes.some((a) => a.name === "inheritFrom")
+  ) {
+    return [...info.attributes, UNIVERSAL_INHERIT_FROM];
+  }
+  return info.attributes;
+}
+
+/**
+ * True for types in the asset hierarchy (BaseAssetType and its descendants).
+ * These are the types on which BAB accepts the universal `inheritFrom`
+ * attribute even when the XSD does not declare it.
+ */
+export function isAssetType(typeName: string | null): boolean {
+  return !!typeName && typeChain(typeName).includes("BaseAssetType");
 }
 
 /**
@@ -168,6 +281,17 @@ export function elementTypeIn(
     if (typed) return typed;
   }
   return elementTypeName(childName);
+}
+
+/**
+ * Resolves a top-level asset element name to the type declared inside
+ * AssetDeclaration. This is the type a fragment/standalone document root
+ * should use when its name collides with a nested child type (e.g. EvaEvent
+ * is both a top-level asset and an FXNugget child).
+ */
+export function topLevelElementType(name: string): string | null {
+  const declType = elementTypeName("AssetDeclaration");
+  return declType ? childTypeOf(declType, name) : null;
 }
 
 export function typeDoc(name: string): string {
