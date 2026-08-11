@@ -20,6 +20,7 @@ import {
   isReferenceAttributeOfType,
   isReferenceContentType,
   mergeLocalAndGlobalDefs,
+  normalizeReferenceId,
 } from "../indexer/refs";
 import {
   referenceSitesForDef,
@@ -92,9 +93,10 @@ export function definitionsForReference(
   idx: ModIndex,
   ctx: ReferenceContext,
 ): AssetDef[] {
+  const lookupId = normalizeReferenceId(ctx.id);
   const defs = mergeLocalAndGlobalDefs(
-    idx.local?.assetsById.get(ctx.id.toLowerCase()),
-    idx.assetsById.get(ctx.id.toLowerCase()),
+    idx.local?.assetsById.get(lookupId.toLowerCase()),
+    idx.assetsById.get(lookupId.toLowerCase()),
   );
   return filterAndScoreDefs(defs, ctx.refType, ctx.selfType).map((t) => t.def);
 }

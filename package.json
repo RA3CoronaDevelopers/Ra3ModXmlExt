@@ -2,7 +2,7 @@
   "name": "ra3-mod-xml",
   "displayName": "%ra3modxml.displayName%",
   "description": "%ra3modxml.description%",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "publisher": "lanyi",
   "license": "SEE LICENSE IN LICENSE",
   "icon": "images/icon.png",

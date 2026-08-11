@@ -10,6 +10,7 @@ import {
   isReferenceAttributeOfType,
   isReferenceContentType,
   isReferenceTargetType,
+  normalizeReferenceId,
   resolveContentReferenceTargets,
   resolveReferenceTargets,
   resolveReferenceTargetsForType,
@@ -344,6 +345,130 @@ test("simpleContent complex types resolve as typed content references", () => {
   );
   assert.equal(subsoundTargets.length, 1);
   assert.equal(subsoundTargets[0].def.type, "AudioEvent");
+});
+
+test("normalizeReferenceId strips a manifest-style Type: prefix", () => {
+  assert.equal(normalizeReferenceId("BaseSoundEffect"), "BaseSoundEffect");
+  assert.equal(
+    normalizeReferenceId("AudioEvent:BaseSoundEffect"),
+    "BaseSoundEffect",
+  );
+  // Art-asset manifest names can carry a subtype segment; the referenceable
+  // id is still the last colon segment.
+  assert.equal(
+    normalizeReferenceId("W3dContainer:W3DContainer:ABC_SKN"),
+    "ABC_SKN",
+  );
+  // A trailing colon has no id yet; keep the raw value so a half-typed
+  // qualified value never matches anything.
+  assert.equal(normalizeReferenceId("AudioEvent:"), "AudioEvent:");
+});
+
+test("qualified Type:Id inheritFrom values resolve to plain-id definitions", () => {
+  const def = {
+    type: "AudioEvent",
+    id: "BaseSoundEffect",
+    file: "Sounds.xml",
+    line: 1,
+    origin: "sdk",
+  };
+  const idx = {
+    assetsById: new Map([["basesoundeffect", [def]]]),
+    assets: new Map(),
+    defines: new Map(),
+  };
+
+  // The reported scenario: <AudioEvent inheritFrom="AudioEvent:BaseSoundEffect"/>.
+  const qualified = resolveReferenceTargetsForType(
+    idx,
+    "AudioEvent",
+    "inheritFrom",
+    "AudioEvent:BaseSoundEffect",
+  );
+  assert.equal(qualified.length, 1);
+  assert.equal(qualified[0].def.id, "BaseSoundEffect");
+
+  // Plain ids keep working unchanged.
+  assert.equal(
+    resolveReferenceTargetsForType(idx, "AudioEvent", "inheritFrom", "BaseSoundEffect")
+      .length,
+    1,
+  );
+
+  // A wrong type prefix is still filtered by selfType: the AudioEvent def
+  // must never satisfy a GameObject inheritFrom.
+  assert.equal(
+    resolveReferenceTargetsForType(
+      idx,
+      "GameObject",
+      "inheritFrom",
+      "GameObject:BaseSoundEffect",
+    ).length,
+    0,
+  );
+});
+
+test("qualified Type:Id values resolve for typed attributes and content refs", () => {
+  const audioEvent = {
+    type: "AudioEvent",
+    id: "JAP_Refinery_Select",
+    file: "SoundEffects.xml",
+    line: 1,
+    origin: "sdk",
+  };
+  const playerTemplate = {
+    type: "PlayerTemplate",
+    id: "Allies",
+    file: "PlayerTemplates.xml",
+    line: 1,
+    origin: "manifest",
+  };
+  const audioFile = {
+    type: "AudioFile",
+    id: "Shared",
+    file: "Audio.xml",
+    line: 1,
+    origin: "project",
+  };
+  const idx = {
+    assetsById: new Map([
+      ["jap_refinery_select", [audioEvent]],
+      ["allies", [playerTemplate]],
+      ["shared", [audioFile]],
+    ]),
+    assets: new Map(),
+    defines: new Map(),
+  };
+
+  // SoundOrEvaEvent@Sound refType is BaseAudioEventInfo; the concrete
+  // "AudioEvent:" prefix must survive normalization and the type filter.
+  const soundTargets = resolveReferenceTargetsForType(
+    idx,
+    "SoundOrEvaEvent",
+    "Sound",
+    "AudioEvent:JAP_Refinery_Select",
+  );
+  assert.equal(soundTargets.length, 1);
+  assert.equal(soundTargets[0].def.type, "AudioEvent");
+
+  // Side="PlayerTemplate:Allies" style attribute.
+  const sideTargets = resolveReferenceTargetsForType(
+    idx,
+    "SideSound",
+    "Side",
+    "PlayerTemplate:Allies",
+  );
+  assert.equal(sideTargets.length, 1);
+  assert.equal(sideTargets[0].def.type, "PlayerTemplate");
+
+  // Simple-content references use the same convention.
+  const contentTargets = resolveContentReferenceTargets(
+    idx,
+    "AudioFileRefWithWeight",
+    "AudioFile:Shared",
+  );
+  assert.equal(contentTargets.length, 1);
+  assert.equal(contentTargets[0].def.type, "AudioFile");
 });
 
 test("untyped and pipeline-local content is not a global reference", () => {

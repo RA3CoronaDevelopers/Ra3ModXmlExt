@@ -299,6 +299,81 @@ test("manifest assets sharing an id keep every type in assetsById", async () => 
   assert.ok(airfield?.some((d) => d.type === "W3DContainer"), "W3DContainer retained");
 });
 
+test("qualified Type:Id inheritFrom resolves against an instance-included SageXml definition", async () => {
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), "ra3-qualified-ref-"));
+  try {
+    const projectDir = join(tmp, "project");
+    const sdkDir = join(tmp, "sdk");
+    fs.mkdirSync(join(projectDir, "Data"), { recursive: true });
+    fs.mkdirSync(join(sdkDir, "SageXml", "Sounds"), { recursive: true });
+    fs.writeFileSync(
+      join(projectDir, "Data", "Mod.xml"),
+      `<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+  <Includes>
+    <Include type="all" source="Units.xml" />
+  </Includes>
+</AssetDeclaration>`,
+    );
+    fs.writeFileSync(
+      join(projectDir, "Data", "Units.xml"),
+      `<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+  <Includes>
+    <Include type="instance" source="DATA:SageXml/Sounds/BaseSoundEffect.xml" />
+  </Includes>
+  <AudioEvent id="ALL_FutureTank_ArmPrimaryWeapon" inheritFrom="AudioEvent:BaseSoundEffect" />
+</AssetDeclaration>`,
+    );
+    fs.writeFileSync(
+      join(sdkDir, "SageXml", "Sounds", "BaseSoundEffect.xml"),
+      `<?xml version="1.0" encoding="utf-8"?>
+<AssetDeclaration xmlns="uri:ea.com:eala:asset">
+  <AudioEvent id="BaseSoundEffect" />
+</AssetDeclaration>`,
+    );
+
+    const indexer = new ModIndexer({
+      projectDir,
+      sdkDir,
+      builtmodsDirs: [],
+      indexSageXml: false,
+      additionalDataSearchPaths: [],
+      walker: new CachedDirectoryWalker(),
+    });
+    const idx = await indexer.build();
+
+    assert.ok(
+      !idx.diagnostics.some((d) => d.code === "include-not-found"),
+      "the DATA:SageXml instance include resolves",
+    );
+    const defs = idx.assetsById.get("basesoundeffect");
+    assert.ok(
+      defs?.some((d) => d.type === "AudioEvent"),
+      "the SageXml definition is indexed through the instance include",
+    );
+
+    const targets = resolveReferenceTargetsForType(
+      idx,
+      "AudioEvent",
+      "inheritFrom",
+      "AudioEvent:BaseSoundEffect",
+    );
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0].def.id, "BaseSoundEffect");
+    assert.equal(targets[0].def.type, "AudioEvent");
+
+    const sageDef = defs.find((d) => d.type === "AudioEvent");
+    const sites = idx.references.get(assetDefKey(sageDef));
+    assert.ok(
+      sites?.some((s) => /Units\.xml$/.test(s.file)),
+      "the qualified inheritFrom lands in the reverse index (FAR / CodeLens)",
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("build publishes an immutable XML phase before art scanning", async () => {
   let phaseA;
   const indexer = new ModIndexer({

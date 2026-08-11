@@ -239,6 +239,63 @@ test("Ctrl+click on simple-content text jumps to the definition", async () => {
   );
 });
 
+test("qualified Type:Id inheritFrom is diagnosed and navigated as resolved", async () => {
+  const text =
+    `<AssetDeclaration xmlns="uri:ea.com:eala:asset">\n` +
+    `  <AudioEvent id="BaseSoundEffect"/>\n` +
+    `  <AudioEvent id="X" inheritFrom="AudioEvent:BaseSoundEffect"/>\n` +
+    `</AssetDeclaration>`;
+  const def = {
+    type: "AudioEvent",
+    id: "BaseSoundEffect",
+    file: URI,
+    line: 1,
+    origin: "project",
+  };
+  const idx = makeIdx([def]);
+  const scope = await makeScope(text, idx);
+
+  // Diagnostics: the manifest-style qualified value must not be reported as
+  // an unresolved reference (the reported FutureTank scenario).
+  const collection = new FakeDiagnosticCollection();
+  const diagnostics = new Ra3Diagnostics({
+    isRa3Workspace: () => true,
+    getScope: async () => scope,
+    settings: {
+      diagnoseUnknownElements: false,
+      reportUnresolvedReferences: "warning",
+    },
+  });
+  diagnostics["collection"] = collection;
+  await diagnostics.update(makeDocument(text));
+  const messages = collection.last.diags.map((d) => d.message);
+  assert.ok(
+    !messages.some((m) => m.includes("AudioEvent:BaseSoundEffect")),
+    "qualified inheritFrom is not unresolved",
+  );
+
+  // Ctrl+click on the qualified value jumps to the plain-id definition.
+  const provider = new Ra3DefinitionProvider({
+    isRa3Workspace: () => true,
+    getScope: async () => scope,
+    settings: { definitionMode: "all" },
+    indexer: null,
+  });
+  const line = text.split("\n")[2];
+  const pos = new Position(2, line.indexOf("AudioEvent:BaseSoundEffect") + 8);
+  const locations = await provider.provideDefinition(makeDocument(text), pos, {});
+  assert.ok(locations && locations.length === 1, "qualified reference resolves");
+  const defLine = text.split("\n")[1];
+  const defStartChar =
+    defLine.indexOf('id="BaseSoundEffect"') + 'id="'.length;
+  assert.equal(locations[0].range.start.line, 1);
+  assert.equal(locations[0].range.start.character, defStartChar);
+  assert.equal(
+    locations[0].range.end.character,
+    defStartChar + "BaseSoundEffect".length,
+  );
+});
+
 test("hover on simpleContent complex content shows the referenced definition", async () => {
   const text =
     `<AssetDeclaration>\n` +

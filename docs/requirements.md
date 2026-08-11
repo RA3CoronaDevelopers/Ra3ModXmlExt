@@ -25,6 +25,8 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
 
 继承机制：`inheritFrom` 让一个元素默认获得目标元素的所有内容；具体合并行为由 `xai:joinAction`（`uri:ea.com:eala:asset:instance` 命名空间）控制，实际项目中出现的取值为 `Replace`、`Remove`。XSD 只在 `BaseInheritableAsset` 上显式声明 `inheritFrom`，但原版与 Corona 数据也在 `FXList`、`AIMicroManagerData` 等 `BaseAssetType` 系资产上使用它，插件按“所有资产类型的通用属性”处理。
 
+引用值写法：原版与 Corona 数据中的引用既可以是裸 ID，也可以是 manifest 风格的全名 `类型:ID`（如 `inheritFrom="AudioEvent:BaseSoundEffect"`、`Sound="AudioEvent:JAP_Refinery_Select"`、`Side="PlayerTemplate:Allies"`、`ParticleTexture="Texture:FXLenzFlare01"`）。XML 定义侧的 `id` 从不含冒号，因此插件统一按“最后冒号段”归一化后再匹配定义，类型过滤仍按 refType / 元素自身类型执行。
+
 全部 XML 语法由 XSD 定义：SDK 自带 `Schemas/xsd/CnC3Types.xsd`（及其 800+ 个子 XSD）。大型 Mod 项目（如 Corona）还会携带自己修改过的 XSD 副本。
 
 ## 二、需求清单
@@ -38,6 +40,7 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
    - 属性值：
      - 引用型属性（XSD 中带 `xas:refType`）补全已定义的资产 ID；
      - `inheritFrom` 补全可继承的资产 ID；
+     - 引用值支持 `类型:ID` 前缀写法：已输入 `AudioEvent:` 时按冒号后的 ID 过滤，插入时保留已输入的前缀；未输入前缀时保持裸 ID 补全；
      - 枚举值（XSD `xs:enumeration`）；
      - `$DEFINE` 常量（如 `$CIV_HEALTH_SMALL`）；
      - `<Include source>` 补全可解析的文件路径（`DATA:` / `ART:` / `AUDIO:`）。
@@ -61,6 +64,7 @@ XML 之间的组织靠 `<Include>` 标签，共有三种语义：
    - 缺失必填 `id`（顶层资产）；
    - 重复 ID（同类型 + 同 id，mod 文件之间；覆盖原版 SageXml 不算冲突）；
    - 引用未解析（引用了不存在的资产 ID，可配置是否忽略原版 manifest 中的 ID）；
+     - 引用值带 `类型:` 前缀时先归一化为裸 ID 再判定（如 `AudioEvent:BaseSoundEffect` → `BaseSoundEffect`），前缀不影响类型过滤；
    - simple-content 引用元素的文本未解析（同属性引用规则，仅带 refType 的类型）。
    - `<Include>` 目标文件找不到、Include 循环；
    - `$DEFINE` 未定义。

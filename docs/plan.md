@@ -142,7 +142,7 @@ test/
    跨重建复用（详见设计决策 14）。
 3. **manifest 资产建模**：类型优先用哈希表，未知时从名称前缀推导；可引用 ID 取最后冒号段；类型名统一走大小写规范化（`W3dContainer` ↔ `W3DContainer`），类型匹配严格遵循 XSD 继承链。`assetsById` 按 id 汇总**全部类型**的定义，去重身份为 `(type, file, line)`，同一 manifest 中同名但不同类型的美术资产（如 `W3DHierarchy:AUMCV_HOVER` 与 `W3DContainer:AUMCV_HOVER`）必须全部保留，避免 `Model@Name` 这类 `BaseRenderAssetType` 引用因先到的非渲染类型而被误判为未解析。
 4. **上下文感知元素类型**：同名元素按父元素类型解析（`resolveElementType` 沿解析树逐层 `childTypeOf`，失败回退全局映射），保证 `<Weapon>` 等元素的属性/引用判定正确。
-5. **引用判定与解析**：`refType` 或 `isRef` 均视为引用；带 `refType` 时严格按类型过滤（同名 ID 不串类型）；`inheritFrom` 按可继承类型过滤。**局部作用域例外**（`isLocalReferenceAttribute`）：`id` 是元素自身的定义点——无 refType 或 refType 与自身类型兼容时不检查、不解析（`RoadObject@id→Road` 这类跨类型 id 引用保留检查）；Poid 类型属性是管线局部引用，全局索引无法判定，不检查、不解析。
+5. **引用判定与解析**：`refType` 或 `isRef` 均视为引用；带 `refType` 时严格按类型过滤（同名 ID 不串类型）；`inheritFrom` 按可继承类型过滤。**局部作用域例外**（`isLocalReferenceAttribute`）：`id` 是元素自身的定义点——无 refType 或 refType 与自身类型兼容时不检查、不解析（`RoadObject@id→Road` 这类跨类型 id 引用保留检查）；Poid 类型属性是管线局部引用，全局索引无法判定，不检查、不解析。**限定引用值**：原版/Mod 数据常用 manifest 风格全名 `类型:ID`（如 `AudioEvent:BaseSoundEffect`、`PlayerTemplate:Allies`）；XML 定义侧 id 从不含冒号，所以查询统一走 `normalizeReferenceId`（取最后冒号段，与 manifest 的 `deriveAssetId` 同一规则）后再按 refType/selfType 过滤，records 仍保留原始值与偏移供导航/悬停使用。
 6. **重复 ID 诊断**：与 `check_duplicate_ids.py` 一致——SageXml 不参与冲突判定，mod 覆盖原版视为正常。
 7. **未解析引用诊断**：按设置严重级别报告（默认 warning）；类型不匹配时给出明确文案（"有同名 ID 但类型不匹配"）。`definitionMode` 设置控制跳转候选：`all`（mod + 原版全部列出，mod 优先）或 `project-only`。
 8. **跳转精度**：XML 定义跳转到 `id` 属性值的精确 Range；manifest 定义映射到源码文件（如 SageXml）时也在文件内精确定位；找不到再回退到记录行。
@@ -424,6 +424,14 @@ test/
      修正；SageXml 源缺失时保持 manifest-only，文件存在但 id 被删时降级
      到文件顶部；测试 178 → 184；分析见 `docs/analysis-issues.md`
      二十八。
+29. [x] 限定引用值 `类型:ID` 归一化（2026-08-11，v0.1.24）：新增
+     `refs.normalizeReferenceId`（取最后冒号段，与 manifest `deriveAssetId`
+     同一规则），应用到属性引用、simple-content 引用、语义反向索引与
+     FAR/CodeLens 的 `definitionsForReference`；records 仍保存原始值与
+     偏移；补全在已输入 `类型:` 前缀时按冒号后片段过滤并保留前缀；
+     实测 SageXml 5483 / Corona 3219 处 `inheritFrom="AudioEvent:..."`
+     等受限引用全部修复；测试 219 → 226；分析见
+     `docs/analysis-issues.md` 三十二。
 
 ## 四、验证结果（实测）
 

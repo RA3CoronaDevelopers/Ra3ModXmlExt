@@ -777,6 +777,69 @@ test("simple-content value completion works before the closing tag is typed", as
   assert.equal(item.range.end.character, pos.character);
 });
 
+test("asset value completion keeps a typed Type: prefix the user already typed", async () => {
+  const def = {
+    type: "AudioEvent",
+    id: "BaseSoundEffect",
+    file: "Sounds.xml",
+    line: 1,
+    origin: "sdk",
+  };
+  const idx = {
+    assets: new Map([["AudioEvent", new Map([["basesoundeffect", [def]]])]]),
+    assetsById: new Map([["basesoundeffect", [def]]]),
+  };
+
+  // Qualified input: the typed "AudioEvent:" prefix must be kept, so the
+  // completed value is "AudioEvent:BaseSoundEffect" and the replacement
+  // range still covers only the current segment.
+  const qualifiedText =
+    `<AssetDeclaration>\n` +
+    `  <AudioEvent id="X" inheritFrom="AudioEvent:Base\n` +
+    `</AssetDeclaration>`;
+  const qualifiedLine = qualifiedText.split("\n")[1];
+  const qualifiedPos = new Position(1, qualifiedLine.length);
+  const qualifiedItems = await makeProvider(idx).provideCompletionItems(
+    makeDocument(qualifiedText),
+    qualifiedPos,
+    token,
+  );
+  const qualifiedLabels = qualifiedItems.map((i) => i.label);
+  assert.ok(
+    qualifiedLabels.includes("AudioEvent:BaseSoundEffect"),
+    "qualified label offered for AudioEvent:Base",
+  );
+  assert.ok(
+    !qualifiedLabels.includes("BaseSoundEffect"),
+    "the bare id is not offered when a type prefix was typed",
+  );
+  const qualifiedItem = qualifiedItems.find(
+    (i) => i.label === "AudioEvent:BaseSoundEffect",
+  );
+  assert.equal(qualifiedItem.insertText, "AudioEvent:BaseSoundEffect");
+  assert.equal(
+    qualifiedItem.range.start.character,
+    qualifiedLine.lastIndexOf('"') + 1,
+  );
+  assert.equal(qualifiedItem.range.end.character, qualifiedPos.character);
+
+  // Plain input stays plain: no prefix typed -> bare id, unchanged behavior.
+  const plainText =
+    `<AssetDeclaration>\n` +
+    `  <AudioEvent id="X" inheritFrom="Base\n` +
+    `</AssetDeclaration>`;
+  const plainLine = plainText.split("\n")[1];
+  const plainPos = new Position(1, plainLine.length);
+  const plainItems = await makeProvider(idx).provideCompletionItems(
+    makeDocument(plainText),
+    plainPos,
+    token,
+  );
+  const plainItem = plainItems.find((i) => i.label === "BaseSoundEffect");
+  assert.ok(plainItem, "bare id offered without a type prefix");
+  assert.equal(plainItem.insertText, "BaseSoundEffect");
+});
+
 test("simpleContent complex child inserts a value pair and triggers suggest", async () => {
   const text =
     `<AssetDeclaration>\n` +

@@ -36,6 +36,11 @@
 - `inheritFrom`（按元素自身类型过滤）；
 - 无 `refType` 的 `isRef` 属性（按同名 ID 匹配任意声明类型）。
 
+引用值本身支持原版/Mod 常用的 manifest 风格全名 `类型:ID`
+（`inheritFrom="AudioEvent:BaseSoundEffect"`、`Sound="AudioEvent:..."`、
+`Side="PlayerTemplate:Allies"`）：解析与反向索引先按 `normalizeReferenceId`
+取最后冒号段，再执行上述类型过滤；记录里的原始值与偏移保持不变。
+
 `inheritFrom` 对 `BaseAssetType` 系资产是通用合法属性（XSD 只在
 `BaseInheritableAsset` 声明，但原版数据在 `FXList` 等类型上也使用）。这里的
 “合法属性”判定与“设计上应显示引用计数”的 `referenceTargetTypes()` 是分开的：

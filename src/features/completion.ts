@@ -484,6 +484,14 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     make: (label: string, kind: vscode.CompletionItemKind, detail: string, doc?: string) => vscode.CompletionItem,
   ): vscode.CompletionItem[] | vscode.CompletionList<vscode.CompletionItem> {
     const lower = prefix.toLowerCase();
+    // Manifest-style qualified values ("AudioEvent:BaseSoundEffect") are
+    // common in vanilla data. When the user already typed a "Type:" prefix,
+    // filter on the id part after the last colon and keep the prefix in the
+    // inserted label (e.g. typing "AudioEvent:Base" completes to
+    // "AudioEvent:BaseSoundEffect", never to a bare "BaseSoundEffect").
+    const colon = lower.lastIndexOf(":");
+    const idPrefix = colon >= 0 ? lower.slice(colon + 1) : lower;
+    const typePrefix = colon >= 0 ? prefix.slice(0, colon + 1) : "";
     // Deduplicate by id: the same asset can be defined in several places at
     // once (current file's local overlay + global index, project XML +
     // compiled manifest, or an override). Showing one completion entry per
@@ -502,7 +510,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       if (seen.has(defKey)) return;
       seen.add(defKey);
       const idKey = def.id.toLowerCase();
-      if (!idKey.startsWith(lower)) return;
+      if (!idKey.startsWith(idPrefix)) return;
       let score = 3;
       if (refType && model.isAssignableTo(def.type, refType)) score = 1;
       if (selfType && model.isAssignableTo(def.type, selfType)) score = 0;
@@ -569,7 +577,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         );
       }
       return make(
-        def.id,
+        typePrefix ? `${typePrefix}${def.id}` : def.id,
         vscode.CompletionItemKind.Value,
         t("{0} · {1}", def.type, origin),
         doc.value,

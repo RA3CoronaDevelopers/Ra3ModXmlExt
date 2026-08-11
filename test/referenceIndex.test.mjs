@@ -157,6 +157,42 @@ test("records extracted from XML resolve through the reference index", () => {
   assert.equal(csSites[0].kind, "attr");
 });
 
+test("qualified Type:Id reference records resolve to plain-id definitions", () => {
+  const def = makeDef("AudioEvent", "BaseSoundEffect", "C:/sdk/Sounds.xml", 2);
+  const lookup = {
+    assets: new Map(),
+    assetsById: new Map([["basesoundeffect", [def]]]),
+  };
+  const records = {
+    assets: [],
+    defines: [],
+    includes: [],
+    rootXiIncludes: [],
+    nestedXiIncludes: [],
+    references: [
+      {
+        kind: "attr",
+        refType: null,
+        selfType: "AudioEvent",
+        value: "AudioEvent:BaseSoundEffect",
+        line: 3,
+        start: 10,
+        end: 40,
+      },
+    ],
+  };
+  const map = buildReferenceIndex(
+    [{ file: "C:/mod/AudioEvent.xml", records }],
+    lookup,
+  );
+
+  const sites = map.get(assetDefKey(def));
+  assert.equal(sites?.length, 1);
+  assert.equal(sites[0].file, "C:/mod/AudioEvent.xml");
+  assert.equal(sites[0].start, 10);
+  assert.equal(sites[0].end, 40);
+});
+
 test("referenceSitesForDefinition unions manifest-source sites onto the SageXml source file", () => {
   const tmp = mkdtempSync(join(tmpdir(), "ra3-refindex-"));
   try {

@@ -2128,3 +2128,90 @@ hover / 跳转 / 诊断 / FAR）在第三十一轮补齐，见下。
 - `docs/plan.md`：simple-content 文本引用说明补充第三十一轮扩展；
 - `docs/features-reference-counts.md`：引用语义说明补充“含 simpleContent 复杂
   类型”。
+
+---
+
+## 三十二、问题分析（2026-08-11）：限定引用值 `类型:ID` 未被归一化导致误报未解析
+
+### 现象
+
+Corona `Data\Allied\Units\AlliedFutureTankX-1\AudioEvent.xml`：
+
+```xml
+<Includes>
+    <Include type="instance" source="DATA:SageXml/Sounds/BaseSoundEffect.xml" />
+</Includes>
+
+<AudioEvent
+    id="ALL_FutureTank_ArmPrimaryWeapon"
+    inheritFrom="AudioEvent:BaseSoundEffect"
+    ... />
+```
+
+报 `Unresolved reference "AudioEvent:BaseSoundEffect"`，提示当前索引中未找到；
+但 `SageXml\Sounds\BaseSoundEffect.xml` 里确实存在 `<AudioEvent id="BaseSoundEffect" />`，
+且 `instance` include 会被索引器与文档局部 overlay 正常 walk。
+
+### 根因
+
+插件只在 **manifest 一侧**做了“资产名 `类型:ID` → 裸 ID（取最后冒号段）”
+的归一化（`manifestParser.deriveAssetId`）；**XML 引用值一侧**直接用原始值查
+`assetsById`。于是 `AudioEvent:BaseSoundEffect` 被当成完整 ID 精确匹配，
+索引里只有 `BaseSoundEffect`，必然查不到。
+
+实测最小复现：索引中包含 `AudioEvent@BaseSoundEffect`（origin=sdk），
+`assetsById.get("audioevent:basesoundeffect")` 返回 NOT FOUND，
+`resolveReferenceTargetsForType` 返回 0 目标。
+
+### 影响面（真实数据统计）
+
+这是原版数据的**普遍写法**，不是用户笔误：
+
+| 属性 | SageXml | Corona Data | 典型值 |
+|---|---|---:|---|
+| `inheritFrom` | 5,483 | 3,219 | `AudioEvent:BaseSoundEffect` |
+| `Sound`（AudioEntry） | 39 | 98 | `AudioEvent:JAP_Refinery_Select` |
+| `Side` | 67 | 195 | `PlayerTemplate:Allies` |
+| `ParticleTexture` | 2 | 2 | `Texture:FXLenzFlare01` |
+
+前缀全部是**定义资产的具体类型**（manifest 全名格式），而 XSD refType 可能是
+基类（如 `Sound` 的 refType 是 `BaseAudioEventInfo`，前缀是 `AudioEvent`）。
+两侧数据的 `id="类型:ID"` 出现次数均为 0，说明定义侧永远是裸 ID，取最后冒号段
+没有歧义。少数 `Sound="AudioEvent:MammothTankTurretMoveLoop"` 等引用在 SDK
+源码与三个 manifest 中都找不到定义，是原版数据自身的死引用，归一化后仍会
+（且应该）继续报未解析。
+
+### 修复
+
+1. `refs.ts` 新增 `normalizeReferenceId(value)`：取最后冒号段（与
+   `deriveAssetId` 同一规则；冒号后为空时保留原值，避免半输入误匹配），
+   应用到 `resolveReferenceTargetsForType` 与 `resolveContentReferenceTargets`。
+2. `referenceIndex.ts` 的 `buildReferenceIndex` 与 `features/references.ts`
+   的 `definitionsForReference` 同样归一化，FAR / CodeLens / 引用 peek 与
+   诊断、hover、跳转保持一致。
+3. `records.ts` 不修改：记录仍保存原始值与原始偏移，导航/悬停范围不受影响，
+   缓存格式与版本不变。
+4. `completion.ts` 的 `assetIdItems`：当前输入段含 `:` 时按冒号后片段过滤，
+   补全项 label/insertText 为“已输入前缀 + 裸 ID”（如 `AudioEvent:Base…`
+   → `AudioEvent:BaseSoundEffect`）；未输入前缀时保持裸 ID 补全，不特判任何
+   类型、也不改变默认补全形态。
+
+### 测试（219 → 226 全绿）
+
+- `refs.test.mjs`：`normalizeReferenceId` 边界；qualified `inheritFrom`
+  解析、裸 ID 不变、错误类型前缀仍被 selfType 过滤；qualified 属性
+  （`Sound` / `Side`）与 simple-content（`AudioFile:...`）引用解析；
+- `referenceIndex.test.mjs`：qualified 记录计入反向索引（FAR / CodeLens 桶）；
+- `indexer.test.mjs`：临时项目集成——`instance` include 进 SageXml +
+  `inheritFrom="AudioEvent:BaseSoundEffect"`，断言定义入库、解析命中、
+  反向索引落点（即用户报告的完整场景）；
+- `completion.test.mjs`：`AudioEvent:Base…` 补全为
+  `AudioEvent:BaseSoundEffect` 且替换范围只覆盖当前段；无前缀仍补裸 ID；
+- `contentFeatures.test.mjs`：qualified `inheritFrom` 不产生未解析诊断，
+  Ctrl+点击精确定位到裸 ID 定义。
+
+### 文档同步
+
+- `docs/requirements.md`：情况描述补充 `类型:ID` 引用写法与归一化规则；
+- `docs/plan.md`：设计决策 5 补充限定引用值归一化，实施记录追加第 29 轮；
+- `CHANGELOG.md`：0.1.24。

@@ -17,6 +17,23 @@ export interface ReferenceTarget {
 }
 
 /**
+ * Normalizes a reference value that may use the manifest-style qualified
+ * form `Type:Id` (e.g. `inheritFrom="AudioEvent:BaseSoundEffect"`,
+ * `Sound="AudioEvent:JAP_Refinery_Select"` or
+ * `Side="PlayerTemplate:Allies"`). XML asset ids never contain ":" (the same
+ * InstanceId rule the manifest parser relies on), so the referenceable id is
+ * the last colon-separated segment, exactly like `deriveAssetId`. Plain ids
+ * are returned unchanged. A trailing colon with an empty remainder is left
+ * unchanged so a half-typed value cannot accidentally match an id.
+ */
+export function normalizeReferenceId(value: string): string {
+  const idx = value.lastIndexOf(":");
+  if (idx < 0) return value;
+  const id = value.slice(idx + 1);
+  return id.length > 0 ? id : value;
+}
+
+/**
  * The subset of `ModIndex` that reference resolution needs. Kept narrow so
  * the reverse reference index can resolve records against the indexer's live
  * maps without constructing a full index snapshot.
@@ -116,9 +133,10 @@ export function resolveReferenceTargetsForType(
   attrName: string,
   id: string,
 ): ReferenceTarget[] {
+  const lookupId = normalizeReferenceId(id);
   const defs = mergeLocalAndGlobalDefs(
-    idx.local?.assetsById.get(id.toLowerCase()),
-    idx.assetsById.get(id.toLowerCase()),
+    idx.local?.assetsById.get(lookupId.toLowerCase()),
+    idx.assetsById.get(lookupId.toLowerCase()),
   );
   if (!defs.length) return [];
 
@@ -175,9 +193,10 @@ export function resolveContentReferenceTargets(
 ): ReferenceTarget[] {
   if (!isReferenceContentType(typeName)) return [];
   if (!typeName) return [];
+  const lookupId = normalizeReferenceId(id);
   const defs = mergeLocalAndGlobalDefs(
-    idx.local?.assetsById.get(id.toLowerCase()),
-    idx.assetsById.get(id.toLowerCase()),
+    idx.local?.assetsById.get(lookupId.toLowerCase()),
+    idx.assetsById.get(lookupId.toLowerCase()),
   );
   if (!defs.length) return [];
   const info = contentInfoOfType(typeName);

@@ -16,6 +16,7 @@ import { extractIndexRecords, type IndexRecords } from "./records";
 import {
   filterAndScoreDefs,
   isReferenceTargetType,
+  normalizeReferenceId,
   type ReferenceLookup,
 } from "./refs";
 import { buildVanillaSearchPaths, resolveSource } from "./includeResolver";
@@ -50,7 +51,9 @@ export function buildReferenceIndex(
   const map = new Map<string, ReferenceSite[]>();
   for (const { file, records } of sources) {
     for (const ref of records.references) {
-      const defs = lookup.assetsById.get(ref.value.toLowerCase());
+      const defs = lookup.assetsById.get(
+        normalizeReferenceId(ref.value).toLowerCase(),
+      );
       if (!defs?.length) continue;
       const targets = filterAndScoreDefs(defs, ref.refType, ref.selfType);
       for (const target of targets) {

@@ -1,8 +1,25 @@
 # Changelog
 
-## 0.1.23 — 2026-08-11
+## 0.1.24 — 2026-08-11
 
 ### Fixed
+
+- Manifest-style qualified reference values (`Type:Id`, e.g.
+  `inheritFrom="AudioEvent:BaseSoundEffect"`,
+  `Sound="AudioEvent:JAP_Refinery_Select"`, `Side="PlayerTemplate:Allies"`)
+  now resolve to the plain-id definitions indexed from XML (mod or
+  `SageXml`). Previously the plugin only applied the “last colon segment”
+  rule to manifest asset names, so qualified XML references were reported as
+  unresolved even when the definition existed (the reported
+  `AudioEvent:BaseSoundEffect` case).
+- The same normalization now applies to simple-content references, the
+  semantic reverse index (Find All References / CodeLens counts), and the
+  reference peek path, so hover, Ctrl+click, diagnostics, reference counts
+  and unreferenced reports all agree.
+- Value completion keeps a `Type:` prefix the user already typed:
+  `inheritFrom="AudioEvent:Base…` completes to
+  `AudioEvent:BaseSoundEffect` instead of dropping the prefix. Plain ids
+  without a prefix keep the previous bare-id behavior.
 
 - `inheritFrom` is now accepted on all `BaseAssetType`-derived assets (e.g. `FXList`, `AIMicroManagerData`, `ObjectCreationList`, `OnDemandTextureImage`, `AITargetingHeuristic`). The XSD only declares it on `BaseInheritableAsset`, but vanilla and Corona data use it more broadly. Attribute legality is now separate from the CodeLens / Find All References “reference target by design” filter, so the universal attribute does not widen the code-lens type list.
 - `simpleContent` complex types (`AudioFileRefWithWeight`, `MultisoundSubsoundRef`) keep their XSD attributes (`Weight`, `Volume`, `PitchShiftLow/High`, ...) and their text content (`<Sound>AudioFile</Sound>`, `<Subsound>VoiceEvent</Subsound>`) is now handled as a typed asset reference by completion, hover, navigation, diagnostics, the semantic reference index, and Find All References.
