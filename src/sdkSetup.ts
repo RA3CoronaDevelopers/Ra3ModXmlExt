@@ -5,6 +5,7 @@ import {
   validateSdkPath,
   type SdkValidation,
 } from "./sdk";
+import { t } from "./localize";
 
 /**
  * Non-intrusive SDK path guidance: a status-bar hint plus a one-time prompt
@@ -32,7 +33,7 @@ export class SdkSetup {
         const ws = this.getWs();
         if (!ws) {
           void vscode.window.showInformationMessage(
-            "RA3 Mod XML: 打开 RA3 Mod 项目后即可配置 SDK 路径。",
+            t("RA3 Mod XML: open an RA3 mod project first to configure the SDK path."),
           );
           return;
         }
@@ -79,26 +80,35 @@ export class SdkSetup {
       (detectedValidation.status === "ok" ||
         detectedValidation.status === "partial")
     ) {
+      const useDetected = t("Use detected path");
+      const chooseManually = t("Choose manually…");
+      const notNow = t("Not now");
       const pick = await vscode.window.showWarningMessage(
-        `RA3 Mod XML 未找到有效的 SDK 路径。检测到已安装的 SDK：${detectedValidation.path}`,
-        "使用检测到的路径",
-        "手动选择…",
-        "暂时不用",
+        t(
+          "RA3 Mod XML could not find a valid SDK path. Detected installed SDK: {0}",
+          detectedValidation.path,
+        ),
+        useDetected,
+        chooseManually,
+        notNow,
       );
-      if (pick === "使用检测到的路径") {
+      if (pick === useDetected) {
         await applySdkPath(detectedValidation.path);
-      } else if (pick === "手动选择…") {
+      } else if (pick === chooseManually) {
         await this.chooseAndApply();
       }
       return;
     }
 
+    const chooseSdkFolder = t("Choose SDK folder…");
     const pick = await vscode.window.showWarningMessage(
-      "RA3 Mod XML 需要 RA3 Mod SDK 路径才能启用原版数据、manifest 与跨文件补全/跳转功能。未设置时插件将以项目模式运行。",
-      "选择 SDK 文件夹…",
-      "暂时不用",
+      t(
+        "RA3 Mod XML needs the RA3 Mod SDK path to enable vanilla data, manifests and cross-file completion/navigation. Without it, the extension runs in project-only mode.",
+      ),
+      chooseSdkFolder,
+      t("Not now"),
     );
-    if (pick === "选择 SDK 文件夹…") await this.chooseAndApply();
+    if (pick === chooseSdkFolder) await this.chooseAndApply();
   }
 
   private async chooseAndApply(): Promise<void> {
@@ -106,17 +116,20 @@ export class SdkSetup {
       canSelectFiles: false,
       canSelectFolders: true,
       canSelectMany: false,
-      openLabel: "选择 SDK 根目录",
-      title: "选择 RA3 Mod SDK 根目录（应包含 Schemas/xsd/CnC3Types.xsd）",
+      openLabel: t("Choose SDK root"),
+      title: t(
+        "Choose the RA3 Mod SDK root (should contain Schemas/xsd/CnC3Types.xsd)",
+      ),
     });
     const dir = picked?.[0]?.fsPath;
     if (!dir) return;
     const validation = validateSdkPath(dir);
     if (validation.status === "missing" || validation.status === "not-sdk") {
       void vscode.window.showErrorMessage(
-        `所选目录不是可用的 RA3 Mod SDK（缺少 ${
-          validation.missing.join("、") || "该目录"
-        }）。请重新选择。`,
+        t(
+          "The selected directory is not a usable RA3 Mod SDK (missing {0}). Please choose again.",
+          validation.missing.join(", ") || t("that directory"),
+        ),
       );
       return;
     }
@@ -127,23 +140,35 @@ export class SdkSetup {
 function statusBarText(validation: SdkValidation): string {
   if (validation.status === "missing") {
     return validation.path
-      ? "$(warning) RA3 XML: SDK 路径不存在"
-      : "$(warning) RA3 XML: 未设置 SDK";
+      ? t("$(warning) RA3 XML: SDK path does not exist")
+      : t("$(warning) RA3 XML: SDK not configured");
   }
-  if (validation.status === "not-sdk") return "$(warning) RA3 XML: SDK 路径无效";
-  return "$(warning) RA3 XML: SDK 不完整";
+  if (validation.status === "not-sdk") {
+    return t("$(warning) RA3 XML: SDK path is invalid");
+  }
+  return t("$(warning) RA3 XML: SDK is incomplete");
 }
 
 function describeSdkValidation(validation: SdkValidation): string {
   if (validation.status === "missing") {
     return validation.path
-      ? `ra3modxml.sdkPath 指向的目录不存在：${validation.path}。点击重新设置；或将 ra3modxml.sdkPath 清空以禁用原版数据功能。`
-      : "未配置 RA3 Mod SDK 路径。点击设置；或将 ra3modxml.sdkPath 清空以禁用原版数据功能。";
+      ? t(
+          "The directory configured in ra3modxml.sdkPath does not exist: {0}. Click to reconfigure, or clear ra3modxml.sdkPath to disable vanilla data features.",
+          validation.path,
+        )
+      : t(
+          "RA3 Mod SDK path is not configured. Click to set it, or clear ra3modxml.sdkPath to disable vanilla data features.",
+        );
   }
   if (validation.status === "not-sdk") {
-    return "ra3modxml.sdkPath 指向的目录不是 RA3 Mod SDK 根目录（缺少 Schemas/xsd/CnC3Types.xsd）。点击重新设置。";
+    return t(
+      "The directory configured in ra3modxml.sdkPath is not an RA3 Mod SDK root (missing Schemas/xsd/CnC3Types.xsd). Click to reconfigure.",
+    );
   }
-  return `RA3 Mod SDK 缺少：${validation.missing.join("、")}。manifest / 原版源码 / SDK 搜索路径等功能不可用。`;
+  return t(
+    "RA3 Mod SDK is missing: {0}. Manifest / vanilla source / SDK search path features are unavailable.",
+    validation.missing.join(", "),
+  );
 }
 
 function isExplicitlyConfigured(
@@ -163,6 +188,6 @@ async function applySdkPath(path: string): Promise<void> {
     .getConfiguration("ra3modxml")
     .update("sdkPath", path, vscode.ConfigurationTarget.Global);
   void vscode.window.showInformationMessage(
-    `RA3 Mod XML: SDK 路径已设置为 ${path}，正在重建索引…`,
+    t("RA3 Mod XML: SDK path set to {0}; rebuilding the index…", path),
   );
 }

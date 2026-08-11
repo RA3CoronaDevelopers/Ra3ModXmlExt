@@ -20,6 +20,7 @@ import {
   Ra3SemanticTokensProvider,
   RA3_SEMANTIC_TOKENS_LEGEND,
 } from "./features/semanticTokens";
+import { t } from "./localize";
 
 const XML_SELECTOR: vscode.DocumentSelector = [{ language: "xml" }];
 /** Safety-net refresh interval while a rebuild is running. */
@@ -203,7 +204,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("ra3modxml.clearCache", () => {
       ws.clearCaches();
       void vscode.window.showInformationMessage(
-        "RA3 Mod XML: caches cleared; rebuilding from scratch…",
+        t("RA3 Mod XML: caches cleared; rebuilding from scratch…"),
       );
     }),
   );
@@ -220,35 +221,63 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!idx) {
         if (ws.isBuilding) {
           void vscode.window.showInformationMessage(
-            "RA3 Mod XML: index is still building — check the status bar. " +
-              "Most features become available after the XML phase.",
+            t(
+              "RA3 Mod XML: index is still building — check the status bar. Most features become available after the XML phase.",
+            ),
           );
           return;
         }
         if (ws.getProjectRoots().length) {
           void vscode.window.showInformationMessage(
-            "RA3 Mod XML: no index for the active project yet — open a mod XML document to start indexing.",
+            t(
+              "RA3 Mod XML: no index for the active project yet — open a mod XML document to start indexing.",
+            ),
           );
           return;
         }
         void vscode.window.showInformationMessage(
-          "RA3 Mod XML: no index available. Open a workspace that contains Data/Mod.xml, Data/additionalmaps/mapmetadata_*.xml or a mod folder.",
+          t(
+            "RA3 Mod XML: no index available. Open a workspace that contains Data/Mod.xml, Data/additionalmaps/mapmetadata_*.xml or a mod folder.",
+          ),
         );
         return;
       }
       const s = idx.stats;
-      const stale = idx.stale ? " (stale)" : "";
+      const stale = idx.stale ? ` ${t("(stale)")}` : "";
       void vscode.window.showInformationMessage(
-        `RA3 Mod XML index\n` +
-          `Project: ${s.projectDir}\n` +
-          `Files: ${s.indexedFiles} (${s.parsedFiles} parsed, ${s.shallowScannedFiles} shallow-scanned, ${s.shallowCacheHits + s.recordsCacheHits} cache hits)\n` +
-          `Assets: ${s.assetCount} (${s.manifestAssetCount} from ${s.manifestFiles} manifests)\n` +
-          `References: ${s.referenceCount}\n` +
-          `Defines: ${s.defineCount} · Streams: ${s.streams} · Candidates: ${s.sourceCandidates}\n` +
-          `Phase: ${s.phase} · Complete: ${s.complete}${stale}\n` +
-          `Build #${ws.buildCount} (trigger: ${ws.lastTrigger})\n` +
-          `Indexed in ${(s.elapsedMs / 1000).toFixed(1)}s\n` +
-          `XML walk: ${(s.walkMs / 1000).toFixed(1)}s · Candidates: ${(s.candidatesMs / 1000).toFixed(1)}s · Art scan: ${(s.artScanMs / 1000).toFixed(1)}s`,
+        [
+          t("RA3 Mod XML index"),
+          t("Project: {0}", s.projectDir),
+          t(
+            "Files: {0} ({1} parsed, {2} shallow-scanned, {3} cache hits)",
+            s.indexedFiles,
+            s.parsedFiles,
+            s.shallowScannedFiles,
+            s.shallowCacheHits + s.recordsCacheHits,
+          ),
+          t(
+            "Assets: {0} ({1} from {2} manifests)",
+            s.assetCount,
+            s.manifestAssetCount,
+            s.manifestFiles,
+          ),
+          t("References: {0}", s.referenceCount),
+          t(
+            "Defines: {0} · Streams: {1} · Candidates: {2}",
+            s.defineCount,
+            s.streams,
+            s.sourceCandidates,
+          ),
+          t("Phase: {0} · Complete: {1}{2}", s.phase, s.complete, stale),
+          t("Build #{0} (trigger: {1})", ws.buildCount, ws.lastTrigger),
+          t("Indexed in {0}s", (s.elapsedMs / 1000).toFixed(1)),
+          t(
+            "XML walk: {0}s · Candidates: {1}s · Art scan: {2}s",
+            (s.walkMs / 1000).toFixed(1),
+            (s.candidatesMs / 1000).toFixed(1),
+            (s.artScanMs / 1000).toFixed(1),
+          ),
+        ].join("\n"),
         { modal: false },
       );
     }),

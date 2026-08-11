@@ -38,6 +38,7 @@ import {
   findProjectRootForFile,
   findProjectRootUpward,
 } from "./projectRoot";
+import { t } from "./localize";
 
 const REBUILD_DEBOUNCE_MS = 1500;
 /** Log a disk-cache validation progress line every N validated records. */
@@ -463,7 +464,7 @@ export class ModWorkspace {
       // stamp matches the current disk state, otherwise the fast build
       // could publish an index built from stale records.
       const pendingArt = await this.seedRecordsFromDisk(state);
-      this.statusBar.text = "$(sync~spin) RA3 XML: indexing…";
+      this.statusBar.text = t("$(sync~spin) RA3 XML: indexing…");
       this.statusBar.show();
       const indexer = new ModIndexer({
         projectDir: state.root,
@@ -488,7 +489,7 @@ export class ModWorkspace {
         // records before phase B so it can trust the cache instead of
         // re-scanning 2.6 GB of models.
         if (!phaseIndex.complete && pendingArt.length) {
-          await this.validateAndSeedCache(state, pendingArt, "art cache");
+          await this.validateAndSeedCache(state, pendingArt, t("art cache"));
         }
       });
       this.publishIndex(state, finalIndex, epochAtStart);
@@ -504,12 +505,11 @@ export class ModWorkspace {
         // Keep the last good snapshot (marked stale) instead of disabling
         // the extension entirely; a later rebuild can recover.
         state.index.stale = true;
-        this.statusBar.text =
-          "$(error) RA3 XML: indexing failed (stale index kept)";
+        this.statusBar.text = t("$(error) RA3 XML: indexing failed (stale index kept)");
         this.statusBar.tooltip = err instanceof Error ? err.message : String(err);
         this.onIndexUpdate?.();
       } else {
-        this.statusBar.text = "$(error) RA3 XML: indexing failed";
+        this.statusBar.text = t("$(error) RA3 XML: indexing failed");
         this.statusBar.tooltip = err instanceof Error ? err.message : String(err);
       }
     } finally {
@@ -612,7 +612,12 @@ export class ModWorkspace {
     const start = Date.now();
     let lastLogCount = 0;
     const onProgress = (done: number): void => {
-      this.statusBar.text = `$(sync~spin) RA3 XML: validating ${label} ${done}/${total}…`;
+      this.statusBar.text = t(
+        "$(sync~spin) RA3 XML: validating {0} {1}/{2}…",
+        label,
+        done,
+        total,
+      );
       this.statusBar.show();
       if (done - lastLogCount >= CACHE_PROGRESS_LOG_EVERY) {
         lastLogCount = done;
@@ -699,31 +704,66 @@ export class ModWorkspace {
 
   /** Human-readable cache status for the `ra3modxml.showCacheReport` command. */
   async cacheReport(): Promise<string> {
-    const lines: string[] = ["RA3 Mod XML cache report"];
-    lines.push(`Projects: ${this.states.size}`);
+    const lines: string[] = [t("RA3 Mod XML cache report")];
+    lines.push(t("Projects: {0}", this.states.size));
     for (const st of this.states.values()) {
-      lines.push(`Project: ${st.root}`);
-      lines.push(`  builds: #${st.buildCount} (last trigger: ${st.lastTrigger})`);
-      lines.push(`  disk cache: ${st.diskCache?.path ?? "not loaded"}`);
+      lines.push(t("Project: {0}", st.root));
+      lines.push(
+        t("  builds: #{0} (last trigger: {1})", st.buildCount, st.lastTrigger),
+      );
+      lines.push(t("  disk cache: {0}", st.diskCache?.path ?? t("not loaded")));
       if (st.diskCache) {
         const status = await st.diskCache.status();
         lines.push(
-          `    file: ${status?.exists ? `${(status.sizeBytes / 1024).toFixed(1)} KB` : "missing"}`,
+          t(
+            "    file: {0}",
+            status?.exists
+              ? t("{0} KB", (status.sizeBytes / 1024).toFixed(1))
+              : t("missing"),
+          ),
         );
         lines.push(
-          `    last load: file=${st.diskCacheStats.fileExists} keyMatched=${st.diskCacheStats.keyMatched} loaded=${st.diskCacheStats.loaded} validated=${st.diskCacheStats.validated} dropped=${st.diskCacheStats.dropped} (load ${st.diskCacheStats.loadMs}ms, validate ${st.diskCacheStats.validateMs}ms)`,
+          t(
+            "    last load: file={0} keyMatched={1} loaded={2} validated={3} dropped={4} (load {5}ms, validate {6}ms)",
+            st.diskCacheStats.fileExists,
+            st.diskCacheStats.keyMatched,
+            st.diskCacheStats.loaded,
+            st.diskCacheStats.validated,
+            st.diskCacheStats.dropped,
+            st.diskCacheStats.loadMs,
+            st.diskCacheStats.validateMs,
+          ),
         );
-        lines.push(`    saved after last build: ${st.diskSaved}`);
+        lines.push(
+          t(
+            "    saved after last build: {0}",
+            st.diskSaved ? t("yes") : t("no"),
+          ),
+        );
       }
       if (st.index) {
         const s = st.index.stats;
         lines.push(
-          `    last build: phase=${s.phase} assets=${s.assetCount} snapshotHits=${s.snapshotHits} snapshotFallbacks=${s.snapshotFallbacks} recordsCacheHits=${s.recordsCacheHits} shallowCacheHits=${s.shallowCacheHits}`,
+          t(
+            "    last build: phase={0} assets={1} snapshotHits={2} snapshotFallbacks={3} recordsCacheHits={4} shallowCacheHits={5}",
+            s.phase,
+            s.assetCount,
+            s.snapshotHits,
+            s.snapshotFallbacks,
+            s.recordsCacheHits,
+            s.shallowCacheHits,
+          ),
         );
       }
     }
     lines.push(
-      `Shared in-memory: ${this.recordsCache.size} record entries · ${this.documentCache.size} documents (${this.documentCache.elements} elements) · ${this.resolveCache.size} include resolutions`,
+      t(
+        "Shared in-memory: {0} record entries · {1} documents ({2} elements) · {3} include resolutions",
+        this.recordsCache.size,
+        this.documentCache.size,
+        this.documentCache.elements,
+        this.resolveCache.size,
+      ),
     );
     return lines.join("\n");
   }
@@ -760,14 +800,17 @@ export class ModWorkspace {
     }
     const building = [...this.states.values()].find((s) => s.building);
     if (building) {
-      this.statusBar.text = "$(sync~spin) RA3 XML: indexing…";
+      this.statusBar.text = t("$(sync~spin) RA3 XML: indexing…");
       this.statusBar.show();
       return;
     }
     const st = this.activeState();
     const idx = st?.index;
     if (!idx || !st) {
-      this.statusBar.text = `$(symbol-misc) RA3 XML: ${this.states.size} project(s) — open a mod XML to index`;
+      this.statusBar.text = t(
+        "$(symbol-misc) RA3 XML: {0} project(s) — open a mod XML to index",
+        this.states.size,
+      );
       this.statusBar.tooltip = [...this.states.values()]
         .map((s) => s.root)
         .join("\n");
@@ -775,16 +818,44 @@ export class ModWorkspace {
       return;
     }
     const s = idx.stats;
-    const stale = idx.stale ? " (stale)" : "";
-    this.statusBar.text = `$(symbol-misc) RA3 XML: ${basename(st.root)} · ${formatCount(s.assetCount)} assets${stale}`;
-    this.statusBar.tooltip =
-      `${st.root}\n` +
-      `${s.indexedFiles} files indexed (${s.parsedFiles} parsed, ${s.shallowScannedFiles} art assets shallow-scanned, ${(s.elapsedMs / 1000).toFixed(1)}s)\n` +
-      `${s.assetCount} assets (${s.manifestAssetCount} from ${s.manifestFiles} manifests)\n` +
-      `${s.referenceCount} reference sites\n` +
-      `${s.defineCount} defines, ${s.streams} streams, ${s.sourceCandidates} include candidates\n` +
-      `Phase: ${s.phase} · Complete: ${s.complete}${stale}\n` +
-      `Disk cache: load ${(st.diskCacheStats.loadMs / 1000).toFixed(1)}s, validate ${(st.diskCacheStats.validateMs / 1000).toFixed(1)}s (${st.diskCacheStats.validated}/${st.diskCacheStats.loaded} ok)`;
+    const stale = idx.stale ? ` ${t("(stale)")}` : "";
+    this.statusBar.text = t(
+      "$(symbol-misc) RA3 XML: {0} · {1} assets{2}",
+      basename(st.root),
+      formatCount(s.assetCount),
+      stale,
+    );
+    this.statusBar.tooltip = [
+      st.root,
+      t(
+        "{0} files indexed ({1} parsed, {2} art assets shallow-scanned, {3}s)",
+        s.indexedFiles,
+        s.parsedFiles,
+        s.shallowScannedFiles,
+        (s.elapsedMs / 1000).toFixed(1),
+      ),
+      t(
+        "{0} assets ({1} from {2} manifests)",
+        s.assetCount,
+        s.manifestAssetCount,
+        s.manifestFiles,
+      ),
+      t("{0} reference sites", s.referenceCount),
+      t(
+        "{0} defines, {1} streams, {2} include candidates",
+        s.defineCount,
+        s.streams,
+        s.sourceCandidates,
+      ),
+      t("Phase: {0} · Complete: {1}{2}", s.phase, s.complete, stale),
+      t(
+        "Disk cache: load {0}s, validate {1}s ({2}/{3} ok)",
+        (st.diskCacheStats.loadMs / 1000).toFixed(1),
+        (st.diskCacheStats.validateMs / 1000).toFixed(1),
+        st.diskCacheStats.validated,
+        st.diskCacheStats.loaded,
+      ),
+    ].join("\n");
     this.statusBar.show();
   }
 

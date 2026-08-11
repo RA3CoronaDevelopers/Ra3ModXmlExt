@@ -53,6 +53,10 @@ export interface XmlElement {
 
 export interface XmlParseError {
   message: string;
+  /** Stable machine-readable id used by the UI layer for localization. */
+  code: string;
+  /** Dynamic values referenced by the localized message. */
+  params?: Record<string, string>;
   offset: number;
   line: number;
   character: number;
@@ -249,9 +253,21 @@ export function parseXml(text: string): XmlDocument {
   let i = 0;
   const n = text.length;
 
-  const err = (message: string, offset: number) => {
+  const err = (
+    code: string,
+    message: string,
+    offset: number,
+    params?: Record<string, string>,
+  ) => {
     const pos = lineMap.positionAt(offset);
-    errors.push({ message, offset, line: pos.line, character: pos.character });
+    errors.push({
+      code,
+      message,
+      params,
+      offset,
+      line: pos.line,
+      character: pos.character,
+    });
   };
 
   while (i < n) {
@@ -261,7 +277,11 @@ export function parseXml(text: string): XmlDocument {
       // text before the root element - ignore unless it is non-whitespace
       const between = text.slice(i, lt);
       if (between.trim() !== "") {
-        err("Content is not allowed before the root element", i);
+        err(
+          "content-before-root",
+          "Content is not allowed before the root element",
+          i,
+        );
       }
     }
     i = lt;
@@ -270,7 +290,7 @@ export function parseXml(text: string): XmlDocument {
     if (text.startsWith("<!--", i)) {
       const close = text.indexOf("-->", i + 4);
       if (close < 0) {
-        err("Unterminated comment", i);
+        err("unterminated-comment", "Unterminated comment", i);
         break;
       }
       i = close + 3;
@@ -280,7 +300,7 @@ export function parseXml(text: string): XmlDocument {
     if (text.startsWith("<![CDATA[", i)) {
       const close = text.indexOf("]]>", i + 9);
       if (close < 0) {
-        err("Unterminated CDATA section", i);
+        err("unterminated-cdata", "Unterminated CDATA section", i);
         break;
       }
       i = close + 3;
@@ -290,7 +310,7 @@ export function parseXml(text: string): XmlDocument {
     if (text.startsWith("<!DOCTYPE", i) || text.startsWith("<!doctype", i)) {
       const close = text.indexOf(">", i);
       if (close < 0) {
-        err("Unterminated DOCTYPE", i);
+        err("unterminated-doctype", "Unterminated DOCTYPE", i);
         break;
       }
       i = close + 1;
@@ -300,7 +320,11 @@ export function parseXml(text: string): XmlDocument {
     if (text.startsWith("<?", i)) {
       const close = text.indexOf("?>", i + 2);
       if (close < 0) {
-        err("Unterminated processing instruction", i);
+        err(
+          "unterminated-processing-instruction",
+          "Unterminated processing instruction",
+          i,
+        );
         break;
       }
       if (i === 0 && /^<\?xml\s/i.test(text.slice(i, close + 2))) {
@@ -313,15 +337,25 @@ export function parseXml(text: string): XmlDocument {
     if (text.startsWith("</", i)) {
       const gt = text.indexOf(">", i + 2);
       if (gt < 0) {
-        err("Unterminated closing tag", i);
+        err("unterminated-closing-tag", "Unterminated closing tag", i);
         break;
       }
       const name = text.slice(i + 2, gt).trim();
       const top = stack[stack.length - 1];
       if (!top) {
-        err(`Unexpected closing tag </${name}>`, i);
+        err(
+          "unexpected-closing-tag",
+          `Unexpected closing tag </${name}>`,
+          i,
+          { name },
+        );
       } else if (top.name !== name) {
-        err(`Mismatched closing tag: expected </${top.name}>, found </${name}>`, i);
+        err(
+          "mismatched-closing-tag",
+          `Mismatched closing tag: expected </${top.name}>, found </${name}>`,
+          i,
+          { expected: top.name, found: name },
+        );
         // recover: find the matching element on the stack if possible
         let idx = stack.length - 1;
         while (idx >= 0 && stack[idx].name !== name) idx--;
@@ -343,13 +377,13 @@ export function parseXml(text: string): XmlDocument {
     }
     // opening tag
     if (text[i + 1] === "!" || text[i + 1] === "?") {
-      err("Malformed markup", i);
+      err("malformed-markup", "Malformed markup", i);
       i++;
       continue;
     }
     const gt = findTagEnd(text, i + 1);
     if (gt < 0) {
-      err("Unterminated start tag", i);
+      err("unterminated-start-tag", "Unterminated start tag", i);
       // Recovery while typing: an attribute value whose closing quote has not
       // been typed yet makes the scanner run to EOF. End the malformed start
       // tag at the first line break (or EOF) so the rest of the document is
@@ -399,7 +433,9 @@ export function parseXml(text: string): XmlDocument {
     for (const el of stack) {
       const pos = lineMap.positionAt(el.start);
       errors.push({
+        code: "element-never-closed",
         message: `Element <${el.name}> is never closed`,
+        params: { name: el.name },
         offset: el.start,
         line: pos.line,
         character: pos.character,

@@ -19,6 +19,7 @@ import {
 import { scopePathKey, type DocumentScope } from "../indexer/localScope";
 import { dirname } from "node:path";
 import { buildSearchPaths, resolveSource } from "../indexer/includeResolver";
+import { t } from "../localize";
 
 export class Ra3HoverProvider implements vscode.HoverProvider {
   constructor(private ws: ModWorkspace) {}
@@ -68,7 +69,9 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       const md = new vscode.MarkdownString();
       md.appendCodeblock(`<${name}>`, "xml");
       md.appendMarkdown(
-        "XInclude element (W3C XInclude namespace) — not part of the RA3 XSD model.",
+        t(
+          "XInclude element (W3C XInclude namespace) — not part of the RA3 XSD model.",
+        ),
       );
       return new vscode.Hover(md);
     }
@@ -76,19 +79,25 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     const info = type ? model.typeInfo(type) : undefined;
     const md = new vscode.MarkdownString();
     md.appendCodeblock(`<${name}>`, "xml");
-    if (model.isTopLevelElement(name)) md.appendMarkdown(`**Top-level asset element**  \n`);
+    if (model.isTopLevelElement(name)) {
+      md.appendMarkdown(`${t("**Top-level asset element**")}  \n`);
+    }
     if (info?.kind === "complex") {
       if (info.doc) md.appendMarkdown(`${info.doc}  \n`);
       md.appendMarkdown(
-        `Attributes: ${info.attributes.length} · Children: ${info.children.length}  \n`,
+        `${t(
+          "Attributes: {0} · Children: {1}",
+          info.attributes.length,
+          info.children.length,
+        )}  \n`,
       );
-      if (info.base) md.appendMarkdown(`Extends: \`${info.base}\``);
+      if (info.base) md.appendMarkdown(t("Extends: `{0}`", info.base));
     } else if (info?.kind === "simple") {
-      md.appendMarkdown(`Simple type: \`${type}\``);
+      md.appendMarkdown(t("Simple type: `{0}`", type ?? ""));
     } else if (type) {
-      md.appendMarkdown(`Type: \`${type}\``);
+      md.appendMarkdown(t("Type: `{0}`", type));
     } else {
-      md.appendMarkdown("Not found in the bundled XSD model.");
+      md.appendMarkdown(t("Not found in the bundled XSD model."));
     }
     return new vscode.Hover(md);
   }
@@ -104,26 +113,38 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     md.appendCodeblock(`${attrName}=""`, "xml");
     if (!attr) {
       if (/^(xmlns|xai:)/.test(attrName)) {
-        md.appendMarkdown(`Namespace/instance attribute.`);
+        md.appendMarkdown(t("Namespace/instance attribute."));
         return new vscode.Hover(md);
       }
       if (!model.isXsdElementName(el.name)) {
         md.appendMarkdown(
-          `XInclude attribute (W3C XInclude namespace) — not part of the RA3 XSD model.`,
+          t(
+            "XInclude attribute (W3C XInclude namespace) — not part of the RA3 XSD model.",
+          ),
         );
         return new vscode.Hover(md);
       }
-      md.appendMarkdown("Unknown attribute for this element.");
+      md.appendMarkdown(t("Unknown attribute for this element."));
       return new vscode.Hover(md);
     }
     if (attr.doc) md.appendMarkdown(`${attr.doc}  \n`);
-    if (attr.required) md.appendMarkdown(`**Required**  \n`);
-    if (attr.refType) md.appendMarkdown(`References assets of type \`${attr.refType}\`  \n`);
+    if (attr.required) md.appendMarkdown(`${t("**Required**")}  \n`);
+    if (attr.refType) {
+      md.appendMarkdown(
+        `${t("References assets of type `{0}`", attr.refType)}  \n`,
+      );
+    }
     if (attr.enumValues.length)
-      md.appendMarkdown(`Values: \`${attr.enumValues.join("`, `")}\`  \n`);
-    if (attr.default != null) md.appendMarkdown(`Default: \`${attr.default}\`  \n`);
-    if (attr.allowsDefine) md.appendMarkdown(`May use \`$DEFINE\` constants  \n`);
-    md.appendMarkdown(`Type: \`${attr.type ?? "string"}\``);
+      md.appendMarkdown(
+        `${t("Values: `{0}`", attr.enumValues.join("`, `"))}  \n`,
+      );
+    if (attr.default != null) {
+      md.appendMarkdown(`${t("Default: `{0}`", attr.default)}  \n`);
+    }
+    if (attr.allowsDefine) {
+      md.appendMarkdown(`${t("May use `$DEFINE` constants")}  \n`);
+    }
+    md.appendMarkdown(t("Type: `{0}`", attr.type ?? "string"));
     return new vscode.Hover(md);
   }
 
@@ -164,17 +185,19 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
           ).path
         : null;
       if (resolved) {
-        md.appendMarkdown(`**Include source**  \n`);
+        md.appendMarkdown(`${t("**Include source**")}  \n`);
         md.appendCodeblock(resolved);
         return new vscode.Hover(md);
       }
       const cand = idx?.sourceCandidates.find((c) => c.source === value);
       if (cand) {
-        md.appendMarkdown(`**Include source**  \n`);
+        md.appendMarkdown(`${t("**Include source**")}  \n`);
         md.appendCodeblock(cand.path);
         return new vscode.Hover(md);
       }
-      md.appendMarkdown(`Include source: \`${value}\` (not in candidate index)`);
+      md.appendMarkdown(
+        t("Include source: `{0}` (not in candidate index)", value),
+      );
       return new vscode.Hover(md);
     }
 
@@ -191,7 +214,7 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     if (!idx) {
       if (isReferenceAttributeOfType(elType, attrName)) {
         md.appendMarkdown(
-          "Index is still building — references cannot be resolved yet.",
+          t("Index is still building — references cannot be resolved yet."),
         );
         return new vscode.Hover(md);
       }
@@ -204,12 +227,14 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
       const attrRef = model
         .attributesOfType(elType)
         .find((a) => a.name === attrName);
-      const expected = attrRef?.refType
-        ? ` of type \`${attrRef.refType}\``
-        : attrRef?.isRef
-          ? " of the expected declared type"
-          : "";
-      return this.noDefinitionHover(expected);
+      return this.noDefinitionHover(
+        attrRef?.refType
+          ? "typed"
+          : attrRef?.isRef
+            ? "untyped"
+            : "generic",
+        attrRef?.refType ?? undefined,
+      );
     }
   }
 
@@ -235,16 +260,16 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     if (!isReferenceContentType(elType)) return null;
     if (!idx) {
       const md = new vscode.MarkdownString();
-      md.appendMarkdown("Index is still building — references cannot be resolved yet.");
+      md.appendMarkdown(
+        t("Index is still building — references cannot be resolved yet."),
+      );
       return new vscode.Hover(md);
     }
     const targets = resolveContentReferenceTargets(idx, elType, value);
     if (targets.length) return this.definitionsHover(targets, document);
     const info = elType ? model.typeInfo(elType) : undefined;
     const refType = info?.kind === "simple" ? info.refType : null;
-    return this.noDefinitionHover(
-      refType ? ` of type \`${refType}\`` : " of the expected declared type",
-    );
+    return this.noDefinitionHover(refType ? "typed" : "untyped", refType ?? undefined);
   }
 
   private defineHover(
@@ -254,10 +279,10 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     if (!defs?.length) return null;
     const d = defs[0];
     const md = new vscode.MarkdownString();
-    md.appendMarkdown(`**Define** \`$${d.name}\`  \n`);
+    md.appendMarkdown(`${t("**Define** `{0}`", `$${d.name}`)}  \n`);
     md.appendCodeblock(d.value);
     const rel = relativePath(document, d.file);
-    md.appendMarkdown(`Defined in \`${rel}:${d.line}\``);
+    md.appendMarkdown(t("Defined in `{0}:{1}`", rel, d.line));
     return new vscode.Hover(md);
   }
 
@@ -266,23 +291,44 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     document: vscode.TextDocument,
   ): vscode.Hover {
     const md2 = new vscode.MarkdownString();
-    md2.appendMarkdown(`**${targets.length} definition${targets.length > 1 ? "s" : ""}**  \n`);
+    md2.appendMarkdown(
+      `${targets.length === 1 ? t("**1 definition**") : t("**{0} definitions**", targets.length)}  \n`,
+    );
     for (const { def: d } of targets.slice(0, 8)) {
       const loc =
         d.origin === "manifest"
-          ? `manifest \`${d.manifestSource ?? d.file}\``
-          : `\`${relativePath(document, d.file)}:${d.line}\``;
-      md2.appendMarkdown(`- \`${d.type}\` · ${loc}  \n`);
+          ? t("manifest `{0}`", d.manifestSource ?? d.file)
+          : t("`{0}:{1}`", relativePath(document, d.file), d.line);
+      md2.appendMarkdown(`${t("- `{0}` · {1}", d.type, loc)}  \n`);
     }
     return new vscode.Hover(md2);
   }
 
-  private noDefinitionHover(expected: string): vscode.Hover {
+  private noDefinitionHover(
+    kind: "typed" | "untyped" | "generic",
+    refType?: string,
+  ): vscode.Hover {
     const md = new vscode.MarkdownString();
-    md.appendMarkdown(
-      `No matching definition${expected} in the current index` +
-        " (may exist in a compiled manifest or vanilla data).",
-    );
+    if (kind === "typed" && refType) {
+      md.appendMarkdown(
+        t(
+          "No matching definition of type `{0}` in the current index (may exist in a compiled manifest or vanilla data).",
+          refType,
+        ),
+      );
+    } else if (kind === "untyped") {
+      md.appendMarkdown(
+        t(
+          "No matching definition of the expected declared type in the current index (may exist in a compiled manifest or vanilla data).",
+        ),
+      );
+    } else {
+      md.appendMarkdown(
+        t(
+          "No matching definition in the current index (may exist in a compiled manifest or vanilla data).",
+        ),
+      );
+    }
     return new vscode.Hover(md);
   }
 
@@ -301,10 +347,10 @@ export class Ra3HoverProvider implements vscode.HoverProvider {
     const lineMap = scope.lineMaps.get(scopePathKey(target.sourceFile));
     const line = lineMap ? lineMap.positionAt(idAttr.valueStart).line + 1 : 0;
     const md = new vscode.MarkdownString();
-    md.appendMarkdown(`**Local pipeline id** \`${value}\`  \n`);
+    md.appendMarkdown(`${t("**Local pipeline id** `{0}`", value)}  \n`);
     md.appendCodeblock(`<${target.name}>`);
     const rel = relativePath(document, target.sourceFile);
-    md.appendMarkdown(`Defined in \`${rel}:${line}\``);
+    md.appendMarkdown(t("Defined in `{0}:{1}`", rel, line));
     return new vscode.Hover(md);
   }
 }

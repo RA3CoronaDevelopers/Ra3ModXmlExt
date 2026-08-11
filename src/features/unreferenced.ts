@@ -3,6 +3,7 @@ import { relative } from "node:path";
 import { findElementAt, parseXml } from "../language/xmlParser";
 import { unreferencedByType } from "../indexer/referenceIndex";
 import type { ModWorkspace } from "../workspace";
+import { t } from "../localize";
 
 interface TypePickItem extends vscode.QuickPickItem {
   type: string;
@@ -26,7 +27,7 @@ export async function findUnreferencedAssets(
   const idx = ws.activeIndex();
   if (!ws.isRa3Workspace() || !idx) {
     void vscode.window.showInformationMessage(
-      "RA3 Mod XML: no index available yet.",
+      t("RA3 Mod XML: no index available yet."),
     );
     return;
   }
@@ -36,18 +37,18 @@ export async function findUnreferencedAssets(
   if (!type) {
     if (!byType.size) {
       void vscode.window.showInformationMessage(
-        "RA3 Mod XML: no unreferenced assets found.",
+        t("RA3 Mod XML: no unreferenced assets found."),
       );
       return;
     }
     const pickedType = await vscode.window.showQuickPick<TypePickItem>(
-      [...byType.entries()].map(([t, defs]) => ({
-        label: t,
-        description: `${defs.length} unreferenced`,
-        type: t,
+      [...byType.entries()].map(([typeName, defs]) => ({
+        label: typeName,
+        description: t("{0} unreferenced", defs.length),
+        type: typeName,
       })),
       {
-        placeHolder: "Select an asset type",
+        placeHolder: t("Select an asset type"),
         matchOnDescription: true,
       },
     );
@@ -58,7 +59,7 @@ export async function findUnreferencedAssets(
   const defs = byType.get(type) ?? [];
   if (!defs.length) {
     void vscode.window.showInformationMessage(
-      `RA3 Mod XML: no unreferenced ${type} assets found.`,
+      t("RA3 Mod XML: no unreferenced {0} assets found.", type),
     );
     return;
   }
@@ -70,7 +71,7 @@ export async function findUnreferencedAssets(
       line: d.line,
     })),
     {
-      placeHolder: `${type}: ${defs.length} unreferenced`,
+      placeHolder: t("{0}: {1} unreferenced", type, defs.length),
       matchOnDescription: true,
     },
   );

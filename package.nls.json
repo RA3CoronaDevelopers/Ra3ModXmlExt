@@ -1,0 +1,18 @@
+{
+  "ra3modxml.displayName": "RA3 Mod XML",
+  "ra3modxml.description": "Red Alert 3 Mod XML tooling: syntax highlighting, completions, reference navigation and diagnostics for SAGE/BinaryAssetBuilder XML.",
+  "ra3modxml.configuration.title": "RA3 Mod XML",
+  "ra3modxml.sdkPath.description": "Path to the RA3 Mod SDK root. Used to resolve DATA:/ART:/AUDIO: includes and to index vanilla SageXml sources. Leave empty to disable vanilla SDK features (project-only mode).",
+  "ra3modxml.indexSageXml.description": "Index vanilla game XML sources shipped with the SDK (SageXml) so completions/references can resolve vanilla asset ids.",
+  "ra3modxml.reportUnresolvedReferences.description": "Severity for attribute references (CommandSet=..., inheritFrom=...) that cannot be resolved in the index. The index covers mod XML sources, SDK SageXml sources and compiled manifests.",
+  "ra3modxml.diagnoseUnknownElements.description": "Report element/attribute names that are not known from the bundled XSD model.",
+  "ra3modxml.definitionMode.description": "Go-to-definition candidates: 'all' lists the mod definition together with any vanilla (SDK/manifest) definitions (mod first); 'project-only' jumps directly to the mod definition and skips vanilla candidates when the id is defined in the project.",
+  "ra3modxml.additionalDataSearchPaths.description": "Extra absolute directories appended to the DATA: search path (checked after the project folders).",
+  "ra3modxml.command.reindex.title": "RA3 Mod XML: Re-index workspace",
+  "ra3modxml.command.openIndexReport.title": "RA3 Mod XML: Show index report",
+  "ra3modxml.command.clearCache.title": "RA3 Mod XML: Clear caches and rebuild",
+  "ra3modxml.command.configureSdkPath.title": "RA3 Mod XML: Configure SDK path…",
+  "ra3modxml.command.showCacheReport.title": "RA3 Mod XML: Show cache report",
+  "ra3modxml.command.findUnreferencedAssets.title": "RA3 Mod XML: Find unreferenced assets…",
+  "ra3modxml.command.findUnreferencedAssetsOfType.title": "RA3 Mod XML: Find unreferenced assets of this type"
+}

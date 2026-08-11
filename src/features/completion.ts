@@ -17,6 +17,7 @@ import {
 } from "../indexer/logicalTree";
 import type { ModWorkspace } from "../workspace";
 import type { ModIndex, AssetDef } from "../indexer/types";
+import { t } from "../localize";
 
 const MAX_VALUE_ITEMS = 400;
 
@@ -79,9 +80,9 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       const docText =
         child.doc ||
         (info?.kind === "complex" ? info.doc : "") ||
-        (type ? `Type: ${type}` : "");
+        (type ? t("Type: {0}", type) : "");
       item.documentation = docText ? new vscode.MarkdownString(docText) : undefined;
-      item.detail = type ? `RA3 XML · ${type}` : "RA3 XML";
+      item.detail = type ? t("RA3 XML · {0}", type) : t("RA3 XML");
       item.insertText = this.elementSnippet(child.name, type, ctx.element == null);
       items.push(item);
     }
@@ -93,7 +94,11 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
   ): { name: string; type: string | null; doc: string }[] {
     if (!parent) {
       return [
-        { name: "AssetDeclaration", type: null, doc: "Root element of every RA3 asset file" },
+        {
+          name: "AssetDeclaration",
+          type: null,
+          doc: t("Root element of every RA3 asset file"),
+        },
       ];
     }
     const parentType = resolveElementType(parent);
@@ -160,12 +165,16 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       item.sortText = attr.required ? "0" + attr.name : "1" + attr.name;
       const md = new vscode.MarkdownString();
       if (attr.doc) md.appendMarkdown(attr.doc + "\n\n");
-      if (attr.required) md.appendMarkdown(`**Required**  \n`);
-      if (attr.refType) md.appendMarkdown(`References: \`${attr.refType}\`  \n`);
+      if (attr.required) md.appendMarkdown(`${t("**Required**")}  \n`);
+      if (attr.refType) {
+        md.appendMarkdown(`${t("References: `{0}`", attr.refType)}  \n`);
+      }
       if (attr.enumValues.length)
-        md.appendMarkdown(`Values: ${attr.enumValues.join(", ")}  \n`);
-      if (attr.default != null) md.appendMarkdown(`Default: \`${attr.default}\`  \n`);
-      md.appendMarkdown(`Type: \`${attr.type ?? "string"}\``);
+        md.appendMarkdown(`${t("Values: {0}", attr.enumValues.join(", "))}  \n`);
+      if (attr.default != null) {
+        md.appendMarkdown(`${t("Default: `{0}`", attr.default)}  \n`);
+      }
+      md.appendMarkdown(t("Type: `{0}`", attr.type ?? "string"));
       item.documentation = md;
       const value = this.attributeValuePlaceholder(attr, el);
       item.insertText = new vscode.SnippetString(
@@ -174,7 +183,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       if (value.trigger) {
         item.command = {
           command: "editor.action.triggerSuggest",
-          title: "Suggest attribute values",
+          title: t("Suggest attribute values"),
         };
       }
       items.push(item);
@@ -187,13 +196,15 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       j.insertText = new vscode.SnippetString(
         layout.prefix + 'xai:joinAction="$1"',
       );
-      j.detail = "Instance join action";
+      j.detail = t("Instance join action");
       j.documentation = new vscode.MarkdownString(
-        "Controls how this element merges with the inherited definition: `Replace` or `Remove`.",
+        t(
+          "Controls how this element merges with the inherited definition: `Replace` or `Remove`.",
+        ),
       );
       j.command = {
         command: "editor.action.triggerSuggest",
-        title: "Suggest attribute values",
+        title: t("Suggest attribute values"),
       };
       items.push(j);
     }
@@ -203,7 +214,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       ns.insertText = new vscode.SnippetString(
         layout.prefix + 'xmlns:xai="uri:ea.com:eala:asset:instance"',
       );
-      ns.detail = "xai namespace";
+      ns.detail = t("xai namespace");
       items.push(ns);
     }
     return items;
@@ -312,7 +323,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     // Include type / source
     if (isInclude && attrName === "type") {
       return ["reference", "instance", "all"].map((v) =>
-        make(v, vscode.CompletionItemKind.EnumMember, "Include type"),
+        make(v, vscode.CompletionItemKind.EnumMember, t("Include type")),
       );
     }
     if (isInclude && attrName === "source") {
@@ -321,7 +332,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     }
     if (attrName === "xai:joinaction" || attrName === "joinaction") {
       return ["Replace", "Remove"].map((v) =>
-        make(v, vscode.CompletionItemKind.EnumMember, "xai:joinAction"),
+        make(v, vscode.CompletionItemKind.EnumMember, t("xai:joinAction")),
       );
     }
 
@@ -348,12 +359,18 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       }
       return attrInfo.enumValues
         .filter((v) => v.toLowerCase().startsWith(prefix.toLowerCase()))
-        .map((v) => make(v, vscode.CompletionItemKind.EnumMember, attrInfo.type ?? "enum"));
+        .map((v) =>
+          make(
+            v,
+            vscode.CompletionItemKind.EnumMember,
+            attrInfo.type ?? t("enum"),
+          ),
+        );
     }
     if (attrInfo?.isBoolean) {
       return ["true", "false"]
         .filter((v) => v.startsWith(prefix.toLowerCase()))
-        .map((v) => make(v, vscode.CompletionItemKind.Value, "boolean"));
+        .map((v) => make(v, vscode.CompletionItemKind.Value, t("boolean")));
     }
     if (idx && attrInfo?.allowsDefine) {
       return this.defineItems(idx, prefix, make);
@@ -412,7 +429,7 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       make(
         v,
         vscode.CompletionItemKind.EnumMember,
-        attrInfo.type ?? "enum",
+        attrInfo.type ?? t("enum"),
         undefined,
         range,
         append ? ` ${v}` : v,
@@ -436,10 +453,14 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         a.source.localeCompare(b.source),
     );
     const items = candidates.map((c) => {
-      const item = make(c.source, vscode.CompletionItemKind.File, "Include source");
+      const item = make(
+        c.source,
+        vscode.CompletionItemKind.File,
+        t("Include source"),
+      );
       item.detail = c.path;
       item.documentation = new vscode.MarkdownString(
-        `\`${c.prefix ?? "relative"}\` · ${c.path}`,
+        t("`{0}` · {1}", c.prefix ?? t("relative"), c.path),
       );
       return item;
     });
@@ -520,19 +541,30 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
     );
     const items = top.map(({ def }) => {
       const originLabel = (d: AssetDef) =>
-        d.origin === "manifest" ? `manifest (${d.manifestSource ?? ""})` : d.origin;
+        d.origin === "manifest"
+          ? d.manifestSource
+            ? t("manifest ({0})", d.manifestSource)
+            : t("manifest")
+          : originLabelText(d.origin);
       const origin = originLabel(def);
       const doc = new vscode.MarkdownString();
       doc.appendCodeblock(def.id);
-      doc.appendMarkdown(`**Type**: ${def.type}  \n`);
-      if (def.manifestSource) doc.appendMarkdown(`**Source**: ${def.manifestSource}  \n`);
-      doc.appendMarkdown(`**Origin**: ${origin}`);
+      doc.appendMarkdown(`${t("**Type**: {0}", def.type)}  \n`);
+      if (def.manifestSource) {
+        doc.appendMarkdown(`${t("**Source**: {0}", def.manifestSource)}  \n`);
+      }
+      doc.appendMarkdown(t("**Origin**: {0}", origin));
       for (const extra of byId.get(def.id.toLowerCase())?.extras ?? []) {
         doc.appendMarkdown(
-          `\n\nAlso defined as **${extra.type}** · ${originLabel(extra)}`,
+          `\n\n${t("Also defined as **{0}** · {1}", extra.type, originLabel(extra))}`,
         );
       }
-      return make(def.id, vscode.CompletionItemKind.Value, `${def.type} · ${origin}`, doc.value);
+      return make(
+        def.id,
+        vscode.CompletionItemKind.Value,
+        t("{0} · {1}", def.type, origin),
+        doc.value,
+      );
     });
     return this.limitItems(items, byId.size);
   }
@@ -557,7 +589,12 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         if (seen.has(dedupe)) continue;
         seen.add(dedupe);
         const label = `$${def.name}`;
-        const item = make(label, vscode.CompletionItemKind.Constant, "Define", def.value);
+        const item = make(
+          label,
+          vscode.CompletionItemKind.Constant,
+          t("Define"),
+          def.value,
+        );
         item.insertText = label;
         items.push(item);
       }
@@ -580,8 +617,10 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
         make(
           id,
           vscode.CompletionItemKind.Value,
-          "local module",
-          "Pipeline-local id in the enclosing GameObject (includes xi:include targets).",
+          t("local module"),
+          t(
+            "Pipeline-local id in the enclosing GameObject (includes xi:include targets).",
+          ),
         ),
       );
     }
@@ -674,7 +713,13 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       if (isList) return this.listEnumItems(info, rawPrefix, seg, valueRange, make);
       return info.enumValues
         .filter((v) => v.toLowerCase().startsWith(seg.token.toLowerCase()))
-        .map((v) => make(v, vscode.CompletionItemKind.EnumMember, elType ?? "enum"));
+        .map((v) =>
+          make(
+            v,
+            vscode.CompletionItemKind.EnumMember,
+            elType ?? t("enum"),
+          ),
+        );
     }
     if (idx && info.allowsDefine) {
       return this.defineItems(idx, seg.token, make);
@@ -708,13 +753,13 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
       item.insertText = this.elementSnippet(child.name, child.type, !typedOpen);
       const type = child.type;
       const info = type ? model.typeInfo(type) : undefined;
-      item.detail = type ? `RA3 XML · ${type}` : "RA3 XML";
+      item.detail = type ? t("RA3 XML · {0}", type) : t("RA3 XML");
       const doc = child.doc || (info?.kind === "complex" ? info.doc : "");
       if (doc) item.documentation = new vscode.MarkdownString(doc);
       if (info?.kind === "simple" && this.simpleContentValueKind(info)) {
         item.command = {
           command: "editor.action.triggerSuggest",
-          title: "Suggest content value",
+          title: t("Suggest content value"),
         };
       }
       items.push(item);
@@ -734,6 +779,19 @@ export class Ra3CompletionProvider implements vscode.CompletionItemProvider {
 interface ScoredDef {
   def: AssetDef;
   score: number;
+}
+
+function originLabelText(origin: AssetDef["origin"]): string {
+  switch (origin) {
+    case "project":
+      return t("project");
+    case "sdk":
+      return t("SDK");
+    case "manifest":
+      return t("manifest");
+    default:
+      return origin;
+  }
 }
 
 function compareScoredDefs(a: ScoredDef, b: ScoredDef): number {

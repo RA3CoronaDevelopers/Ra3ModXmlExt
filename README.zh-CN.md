@@ -1,10 +1,14 @@
 > This site is not endorsed by or affiliated with Electronic Arts, or its licensors. Trademarks are the property of their respective owners. Game content and materials copyright Electronic Arts Inc. and its licensors. All Rights Reserved.
 >
-> RA3 Mod XML is an unofficial fan-made tool. It requires a separately installed RA3 Mod SDK.
+> RA3 Mod XML is an unofficial player-made tool. It requires a separately installed RA3 Mod SDK.
 
 [English](README.md) | [**中文**](README.zh-CN.md)
 
 # RA3 Mod XML
+
+> **AI 生成项目**
+>
+> 本扩展几乎完全由 AI 生成，因此可能存在意外 bug 或边界情况。欢迎提交 bug 报告、修正与反馈。
 
 一款面向 **《命令与征服：红色警戒 3》** XML 模组的 VS Code 扩展，提供 **IntelliSense、导航、引用追踪与诊断** 能力。
 
@@ -133,6 +137,9 @@
 
 如果已安装 SDK，扩展会从注册表检测到它并提供一键设置；也可以手动设置
 `ra3modxml.sdkPath`，或使用 `RA3 Mod XML: Configure SDK path…` 命令。
+
+`ra3modxml.sdkPath` 的默认值本身就是空字符串。**不修改该设置**不会抑制 SDK
+设置提示；只有显式把它设为空字符串，才表示永久禁用 SDK 功能。
 
 ## 命令
 

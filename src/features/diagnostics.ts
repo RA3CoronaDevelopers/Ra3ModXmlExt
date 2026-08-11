@@ -1,6 +1,10 @@
 import * as vscode from "vscode";
 import { dirname } from "node:path";
-import { LineMap, type XmlElement } from "../language/xmlParser";
+import {
+  LineMap,
+  type XmlElement,
+  type XmlParseError,
+} from "../language/xmlParser";
 import { resolveElementType } from "../language/typeContext";
 import { resolveSource, buildSearchPaths } from "../indexer/includeResolver";
 import { validateSdkPath } from "../sdk";
@@ -16,6 +20,7 @@ import {
 } from "../indexer/refs";
 import type { LogicalElement } from "../indexer/logicalTree";
 import { scopePathKey } from "../indexer/localScope";
+import { t } from "../localize";
 
 export class Ra3Diagnostics {
   private collection: vscode.DiagnosticCollection;
@@ -57,7 +62,7 @@ export class Ra3Diagnostics {
             new vscode.Position(err.line, err.character),
             new vscode.Position(err.line, err.character + 1),
           ),
-          err.message,
+          this.parseErrorMessage(err),
           vscode.DiagnosticSeverity.Error,
           "xml-syntax",
         ),
@@ -77,6 +82,42 @@ export class Ra3Diagnostics {
     }
 
     this.collection.set(document.uri, diags);
+  }
+
+  private parseErrorMessage(err: XmlParseError): string {
+    switch (err.code) {
+      case "content-before-root":
+        return t("Content is not allowed before the root element");
+      case "unterminated-comment":
+        return t("Unterminated comment");
+      case "unterminated-cdata":
+        return t("Unterminated CDATA section");
+      case "unterminated-doctype":
+        return t("Unterminated DOCTYPE");
+      case "unterminated-processing-instruction":
+        return t("Unterminated processing instruction");
+      case "unterminated-closing-tag":
+        return t("Unterminated closing tag");
+      case "unterminated-start-tag":
+        return t("Unterminated start tag");
+      case "malformed-markup":
+        return t("Malformed markup");
+      case "unexpected-closing-tag":
+        return t(
+          "Unexpected closing tag </{0}>",
+          err.params?.name ?? "",
+        );
+      case "mismatched-closing-tag":
+        return t(
+          "Mismatched closing tag: expected </{0}>, found </{1}>",
+          err.params?.expected ?? "",
+          err.params?.found ?? "",
+        );
+      case "element-never-closed":
+        return t("Element <{0}> is never closed", err.params?.name ?? "");
+      default:
+        return err.message;
+    }
   }
 
   clear(uri: vscode.Uri): void {
@@ -120,7 +161,7 @@ export class Ra3Diagnostics {
           diags.push(
             this.diag(
               range,
-              `Top-level asset <${local}> requires an id attribute`,
+              t("Top-level asset <{0}> requires an id attribute", local),
               vscode.DiagnosticSeverity.Error,
               "missing-id",
             ),
@@ -136,7 +177,12 @@ export class Ra3Diagnostics {
             diags.push(
               this.diag(
                 where,
-                `Duplicate id "${idAttr.value}" for <${local}> (also defined on line ${prev.line})`,
+                t(
+                  'Duplicate id "{0}" for <{1}> (also defined on line {2})',
+                  idAttr.value,
+                  local,
+                  prev.line,
+                ),
                 vscode.DiagnosticSeverity.Error,
                 "duplicate-id",
               ),
@@ -166,7 +212,7 @@ export class Ra3Diagnostics {
           diags.push(
             this.diag(
               range,
-              `Unknown element <${local}> (not in the RA3 XSD model)`,
+              t("Unknown element <{0}> (not in the RA3 XSD model)", local),
               vscode.DiagnosticSeverity.Warning,
               "unknown-element",
             ),
@@ -187,16 +233,16 @@ export class Ra3Diagnostics {
             continue;
           }
           if (settings.diagnoseUnknownElements && !knownNames.has(aName)) {
-            diags.push(
-              this.diag(
-                new vscode.Range(
-                  document.positionAt(attr.nameStart),
-                  document.positionAt(attr.nameEnd),
+              diags.push(
+                this.diag(
+                  new vscode.Range(
+                    document.positionAt(attr.nameStart),
+                    document.positionAt(attr.nameEnd),
+                  ),
+                  t('Unknown attribute "{0}" for <{1}>', aName, local),
+                  vscode.DiagnosticSeverity.Warning,
+                  "unknown-attribute",
                 ),
-                `Unknown attribute "${aName}" for <${local}>`,
-                vscode.DiagnosticSeverity.Warning,
-                "unknown-attribute",
-              ),
             );
           }
 
@@ -258,8 +304,12 @@ export class Ra3Diagnostics {
       diags.push(
         this.diag(
           range,
-          `Duplicate id "${id}" for <${type}> (also defined in ${other.file})` +
-            (provisional ? " (based on a partial index)" : ""),
+          t(
+            'Duplicate id "{0}" for <{1}> (also defined in {2})',
+            id,
+            type,
+            other.file,
+          ) + (provisional ? t(" (based on a partial index)") : ""),
           vscode.DiagnosticSeverity.Error,
           "duplicate-id",
         ),
@@ -296,8 +346,8 @@ export class Ra3Diagnostics {
         diags.push(
           this.diag(
             range,
-            `Undefined define "$${m[1]}"` +
-              (provisional ? " (index incomplete — may be a false positive)" : ""),
+            t('Undefined define "${0}"', m[1]) +
+              (provisional ? t(" (index incomplete — may be a false positive)") : ""),
             vscode.DiagnosticSeverity.Warning,
             code,
           ),
@@ -318,20 +368,18 @@ export class Ra3Diagnostics {
     const attrRef = model
       .attributesOfType(elType)
       .find((a) => a.name === attrName);
-    const expected = attrRef?.refType
-      ? `of type \`${attrRef.refType}\``
-      : attrRef?.isRef
-        ? "of the expected declared type"
-        : "matching";
     const code = provisional ? "unresolved-reference-indexing" : "unresolved-reference";
-    const baseMessage = anyDef
-      ? `Reference "${value}" has no definition ${expected} (ids with the same name exist for other types)`
-      : `Unresolved reference "${value}" (not found in the current index)`;
+    const baseMessage = unresolvedReferenceMessage(
+      value,
+      anyDef,
+      attrRef?.refType ?? null,
+      attrRef?.isRef ?? false,
+    );
     diags.push(
       this.diag(
         range,
         provisional
-          ? `${baseMessage} (index incomplete — may be a false positive)`
+          ? baseMessage + t(" (index incomplete — may be a false positive)")
           : baseMessage,
         severity === "warning"
           ? vscode.DiagnosticSeverity.Warning
@@ -379,8 +427,8 @@ export class Ra3Diagnostics {
         diags.push(
           this.diag(
             range,
-            `Undefined define "$${m[1]}"` +
-              (provisional ? " (index incomplete — may be a false positive)" : ""),
+            t('Undefined define "${0}"', m[1]) +
+              (provisional ? t(" (index incomplete — may be a false positive)") : ""),
             vscode.DiagnosticSeverity.Warning,
             code,
           ),
@@ -398,16 +446,18 @@ export class Ra3Diagnostics {
       (idx.local?.assetsById.has(value.toLowerCase()) ?? false) ||
       idx.assetsById.has(value.toLowerCase());
     const refType = info.refType;
-    const expected = refType ? `of type \`${refType}\`` : "of the expected declared type";
     const code = provisional ? "unresolved-reference-indexing" : "unresolved-reference";
-    const baseMessage = anyDef
-      ? `Reference "${value}" has no definition ${expected} (ids with the same name exist for other types)`
-      : `Unresolved reference "${value}" (not found in the current index)`;
+    const baseMessage = unresolvedReferenceMessage(
+      value,
+      anyDef,
+      refType ?? null,
+      !refType,
+    );
     diags.push(
       this.diag(
         range,
         provisional
-          ? `${baseMessage} (index incomplete — may be a false positive)`
+          ? baseMessage + t(" (index incomplete — may be a false positive)")
           : baseMessage,
         severity === "warning"
           ? vscode.DiagnosticSeverity.Warning
@@ -432,7 +482,10 @@ export class Ra3Diagnostics {
             document.positionAt(typeAttr.valueStart),
             document.positionAt(typeAttr.valueEnd),
           ),
-          `Invalid Include type "${typeAttr.value}" (expected reference, instance or all)`,
+          t(
+            'Invalid Include type "{0}" (expected reference, instance or all)',
+            typeAttr.value,
+          ),
           vscode.DiagnosticSeverity.Error,
           "include-type",
         ),
@@ -462,7 +515,7 @@ export class Ra3Diagnostics {
             document.positionAt(sourceAttr.valueStart),
             document.positionAt(sourceAttr.valueEnd),
           ),
-          `Include target not found: ${sourceAttr.value}`,
+          t("Include target not found: {0}", sourceAttr.value),
           vscode.DiagnosticSeverity.Warning,
           "include-not-found",
         ),
@@ -486,6 +539,34 @@ export class Ra3Diagnostics {
 function localName(tag: string): string {
   const idx = tag.lastIndexOf(":");
   return idx >= 0 ? tag.slice(idx + 1) : tag;
+}
+
+function unresolvedReferenceMessage(
+  value: string,
+  anyDef: boolean,
+  refType: string | null,
+  isRef: boolean,
+): string {
+  if (anyDef) {
+    if (refType) {
+      return t(
+        'Reference "{0}" has no definition of type `{1}` (ids with the same name exist for other types)',
+        value,
+        refType,
+      );
+    }
+    if (isRef) {
+      return t(
+        'Reference "{0}" has no definition of the expected declared type (ids with the same name exist for other types)',
+        value,
+      );
+    }
+    return t(
+      'Reference "{0}" has no matching definition (ids with the same name exist for other types)',
+      value,
+    );
+  }
+  return t('Unresolved reference "{0}" (not found in the current index)', value);
 }
 
 function tagRange(document: vscode.TextDocument, el: XmlElement): vscode.Range {

@@ -1,10 +1,14 @@
 > This site is not endorsed by or affiliated with Electronic Arts, or its licensors. Trademarks are the property of their respective owners. Game content and materials copyright Electronic Arts Inc. and its licensors. All Rights Reserved.
 >
-> RA3 Mod XML is an unofficial fan-made tool. It requires a separately installed RA3 Mod SDK.
+> RA3 Mod XML is an unofficial player-made tool. It requires a separately installed RA3 Mod SDK.
 
 [**English**](README.md) | [中文](README.zh-CN.md)
 
 # RA3 Mod XML
+
+> **AI-generated project**
+>
+> This extension was generated almost entirely by AI. As a result, there may be unexpected bugs or edge cases. Bug reports, corrections, and feedback are very welcome.
 
 A VS Code extension that brings **IntelliSense, navigation, reference tracking, and diagnostics** to XML-based mods for **Command & Conquer: Red Alert 3**.
 
@@ -135,6 +139,10 @@ to configure the path (once per session).
 If the SDK is installed, the extension detects it from the registry and offers
 it with one click; otherwise you can set `ra3modxml.sdkPath` manually or use
 the `RA3 Mod XML: Configure SDK path…` command.
+
+An empty `ra3modxml.sdkPath` is also the default value. Leaving the setting
+untouched does **not** suppress the SDK setup hint; only explicitly setting it
+to an empty string opts out of SDK features permanently.
 
 ## Commands
 

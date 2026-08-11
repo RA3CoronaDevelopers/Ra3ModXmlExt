@@ -10,6 +10,7 @@ import {
   type ShowReferencesArgs,
 } from "./references";
 import type { ModWorkspace } from "../workspace";
+import { t } from "../localize";
 
 /** Never build a DOM for huge files just to show counts (w3x safety). */
 const MAX_CODELENS_TEXT = 4 * 1024 * 1024;
@@ -124,10 +125,10 @@ export class Ra3CodeLensProvider implements vscode.CodeLensProvider {
         new vscode.CodeLens(range, {
           title:
             count === 0
-              ? "0 references"
+              ? t("0 references")
               : count === 1
-                ? "1 reference"
-                : `${count} references`,
+                ? t("1 reference")
+                : t("{0} references", count),
           command: "ra3modxml.showReferences",
           arguments: [args],
         }),

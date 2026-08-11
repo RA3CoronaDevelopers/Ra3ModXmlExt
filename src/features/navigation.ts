@@ -24,6 +24,7 @@ import {
 import { scopePathKey, type DocumentScope } from "../indexer/localScope";
 import type { ModWorkspace } from "../workspace";
 import type { AssetDef, ModIndex } from "../indexer/types";
+import { t } from "../localize";
 
 function searchPathsFor(idx: ModIndex): SearchPaths {
   return buildSearchPaths(idx.sdkDir, idx.projectDir);
@@ -404,7 +405,13 @@ export class Ra3DocumentSymbolProvider implements vscode.DocumentSymbolProvider 
           document.positionAt(define.end),
         );
         symbols.push(
-          new vscode.DocumentSymbol(`$${name}`, "Define", vscode.SymbolKind.Constant, range, range),
+          new vscode.DocumentSymbol(
+            `$${name}`,
+            t("Define"),
+            vscode.SymbolKind.Constant,
+            range,
+            range,
+          ),
         );
       }
     }

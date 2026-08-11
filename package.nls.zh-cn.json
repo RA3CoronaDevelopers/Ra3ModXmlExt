@@ -1,0 +1,18 @@
+{
+  "ra3modxml.displayName": "RA3 Mod XML",
+  "ra3modxml.description": "红警 3 Mod XML 工具：为 SAGE/BinaryAssetBuilder XML 提供语法高亮、自动补全、引用跳转与诊断。",
+  "ra3modxml.configuration.title": "RA3 Mod XML",
+  "ra3modxml.sdkPath.description": "RA3 Mod SDK 根目录路径。用于解析 DATA:/ART:/AUDIO: include，并索引原版 SageXml 源码。留空可禁用 SDK 原版功能（仅项目模式）。",
+  "ra3modxml.indexSageXml.description": "索引 SDK 附带的原版游戏 XML 源码（SageXml），使补全/引用可以解析原版资产 id。",
+  "ra3modxml.reportUnresolvedReferences.description": "索引中无法解析的属性引用（CommandSet=...、inheritFrom=...）的诊断级别。索引覆盖 mod XML 源码、SDK SageXml 源码和编译后的 manifest。",
+  "ra3modxml.diagnoseUnknownElements.description": "报告不在内置 XSD 模型中的元素/属性名。",
+  "ra3modxml.definitionMode.description": "跳转定义候选项：'all' 同时列出 mod 定义与原版（SDK/manifest）定义（mod 优先）；'project-only' 在项目内已定义该 id 时直接跳转 mod 定义并跳过原版候选。",
+  "ra3modxml.additionalDataSearchPaths.description": "追加到 DATA: 搜索路径末尾的额外绝对目录（在项目文件夹之后检查）。",
+  "ra3modxml.command.reindex.title": "RA3 Mod XML: 重建索引",
+  "ra3modxml.command.openIndexReport.title": "RA3 Mod XML: 显示索引报告",
+  "ra3modxml.command.clearCache.title": "RA3 Mod XML: 清空缓存并重建",
+  "ra3modxml.command.configureSdkPath.title": "RA3 Mod XML: 配置 SDK 路径…",
+  "ra3modxml.command.showCacheReport.title": "RA3 Mod XML: 显示缓存报告",
+  "ra3modxml.command.findUnreferencedAssets.title": "RA3 Mod XML: 查找未引用的资产…",
+  "ra3modxml.command.findUnreferencedAssetsOfType.title": "RA3 Mod XML: 查找该类型的未引用资产"
+}

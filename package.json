@@ -1,10 +1,11 @@
 {
   "name": "ra3-mod-xml",
-  "displayName": "RA3 Mod XML",
-  "description": "Red Alert 3 Mod XML tooling: syntax highlighting, completions, reference navigation and diagnostics for SAGE/BinaryAssetBuilder XML.",
-  "version": "0.1.20",
+  "displayName": "%ra3modxml.displayName%",
+  "description": "%ra3modxml.description%",
+  "version": "0.1.21",
   "publisher": "ra3-mod-xml",
   "license": "SEE LICENSE IN LICENSE",
+  "l10n": "./l10n",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -42,17 +43,17 @@
       }
     ],
     "configuration": {
-      "title": "RA3 Mod XML",
+      "title": "%ra3modxml.configuration.title%",
       "properties": {
         "ra3modxml.sdkPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the RA3 Mod SDK root. Used to resolve DATA:/ART:/AUDIO: includes and to index vanilla SageXml sources. Leave empty to disable vanilla SDK features (project-only mode)."
+          "description": "%ra3modxml.sdkPath.description%"
         },
         "ra3modxml.indexSageXml": {
           "type": "boolean",
           "default": true,
-          "description": "Index vanilla game XML sources shipped with the SDK (SageXml) so completions/references can resolve vanilla asset ids."
+          "description": "%ra3modxml.indexSageXml.description%"
         },
         "ra3modxml.reportUnresolvedReferences": {
           "type": "string",
@@ -62,12 +63,12 @@
             "none"
           ],
           "default": "warning",
-          "description": "Severity for attribute references (CommandSet=..., inheritFrom=...) that cannot be resolved in the index. The index covers mod XML sources, SDK SageXml sources and compiled manifests."
+          "description": "%ra3modxml.reportUnresolvedReferences.description%"
         },
         "ra3modxml.diagnoseUnknownElements": {
           "type": "boolean",
           "default": true,
-          "description": "Report element/attribute names that are not known from the bundled XSD model."
+          "description": "%ra3modxml.diagnoseUnknownElements.description%"
         },
         "ra3modxml.definitionMode": {
           "type": "string",
@@ -76,7 +77,7 @@
             "project-only"
           ],
           "default": "all",
-          "description": "Go-to-definition candidates: 'all' lists the mod definition together with any vanilla (SDK/manifest) definitions (mod first); 'project-only' jumps directly to the mod definition and skips vanilla candidates when the id is defined in the project."
+          "description": "%ra3modxml.definitionMode.description%"
         },
         "ra3modxml.additionalDataSearchPaths": {
           "type": "array",
@@ -84,38 +85,38 @@
             "type": "string"
           },
           "default": [],
-          "description": "Extra absolute directories appended to the DATA: search path (checked after the project folders)."
+          "description": "%ra3modxml.additionalDataSearchPaths.description%"
         }
       }
     },
     "commands": [
       {
         "command": "ra3modxml.reindex",
-        "title": "RA3 Mod XML: Re-index workspace"
+        "title": "%ra3modxml.command.reindex.title%"
       },
       {
         "command": "ra3modxml.openIndexReport",
-        "title": "RA3 Mod XML: Show index report"
+        "title": "%ra3modxml.command.openIndexReport.title%"
       },
       {
         "command": "ra3modxml.clearCache",
-        "title": "RA3 Mod XML: Clear caches and rebuild"
+        "title": "%ra3modxml.command.clearCache.title%"
       },
       {
         "command": "ra3modxml.configureSdkPath",
-        "title": "RA3 Mod XML: Configure SDK path…"
+        "title": "%ra3modxml.command.configureSdkPath.title%"
       },
       {
         "command": "ra3modxml.showCacheReport",
-        "title": "RA3 Mod XML: Show cache report"
+        "title": "%ra3modxml.command.showCacheReport.title%"
       },
       {
         "command": "ra3modxml.findUnreferencedAssets",
-        "title": "RA3 Mod XML: Find unreferenced assets…"
+        "title": "%ra3modxml.command.findUnreferencedAssets.title%"
       },
       {
         "command": "ra3modxml.findUnreferencedAssetsOfType",
-        "title": "RA3 Mod XML: Find unreferenced assets of this type"
+        "title": "%ra3modxml.command.findUnreferencedAssetsOfType.title%"
       }
     ]
   },
@@ -134,7 +135,7 @@
     "generate-model": "node tools/xsd-to-model.mjs",
     "pretest": "tsc",
     "test": "node --test \"test/*.test.mjs\"",
-    "package": "npm run build && vsce package"
+    "package": "npm run build && vsce package --no-rewrite-relative-links"
   },
   "dependencies": {
     "fast-xml-parser": "^4.5.0"
